@@ -30,16 +30,25 @@ pub(super) struct WideMass<
 }
 
 impl<E: Field + Unreduced, const MAX_DIGIT_BASIS: usize> WideMass<E, MAX_DIGIT_BASIS> {
-    pub(super) fn new(block_count: usize, block_len: usize, b: usize) -> Self {
+    pub(super) fn new(block_count: usize, block_len: usize, b: usize) -> Self
+    where
+        E: 'static,
+    {
         debug_assert!(
             MAX_DIGIT_BASIS.is_power_of_two()
                 && b.is_power_of_two()
                 && (2..=MAX_DIGIT_BASIS).contains(&b)
         );
+        #[cfg(target_arch = "aarch64")]
+        let direct = block_len >= 64
+            && std::any::TypeId::of::<E>() == std::any::TypeId::of::<super::p64_mass::Weight>();
+        #[cfg(not(target_arch = "aarch64"))]
+        let direct = false;
+        let pending_blocks = if direct { 0 } else { block_count };
         Self {
-            wide: vec![E::Wide::zero(); block_count * block_len],
+            wide: vec![E::Wide::zero(); pending_blocks * block_len],
             reduced: vec![E::zero(); block_count * block_len],
-            pending: vec![0; block_count],
+            pending: vec![0; pending_blocks],
             block_len,
             // A lane of `E::Wide::from(factor)` is below `2^16`, and a digit's
             // magnitude is at most `b / 2`.
@@ -64,6 +73,22 @@ impl<E: Field + Unreduced, const MAX_DIGIT_BASIS: usize> WideMass<E, MAX_DIGIT_B
     {
         assert!(rows.len() <= self.max_pending);
         if rows.is_empty() {
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.pending.is_empty() {
+            use super::p64_mass;
+            use std::any::Any;
+
+            let block_len = self.block_len;
+            let slots = block * block_len..(block + 1) * block_len;
+            let output = (&mut self.reduced as &mut dyn Any)
+                .downcast_mut::<Vec<p64_mass::Weight>>()
+                .expect("direct mass storage uses the P64 extension");
+            let use_neon = std::arch::is_aarch64_feature_detected!("neon");
+            #[cfg(test)]
+            let use_neon = use_neon && !self.force_portable;
+            p64_mass::add_rows(&mut output[slots], self.half, rows, digits, use_neon);
             return;
         }
         if self.pending[block] + rows.len() > self.max_pending {
@@ -371,6 +396,8 @@ mod tests {
             }
         }
     }
+
+    include!("wide_mass/tests/repeated_batches.rs");
 
     #[test]
     fn basis32_rows_match_direct_sum_across_flushes() {

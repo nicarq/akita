@@ -70,7 +70,8 @@ fn packed_zero_lanes_preserve_fold_inputs_and_relation_moments() {
         (0..LANES * COEFF)
             .map(|i| {
                 let lane = i / COEFF;
-                if (5..261).contains(&lane) || (272..768).contains(&lane) && lane % 3 != 0 {
+                if (5..261).contains(&lane) || (272..768).contains(&lane) && !lane.is_multiple_of(3)
+                {
                     0
                 } else {
                     ((i * 11 + i / 21) % 8) as i8 - 4

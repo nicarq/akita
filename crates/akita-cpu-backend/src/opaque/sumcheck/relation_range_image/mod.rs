@@ -377,6 +377,8 @@ mod lane_product;
 mod lifecycle;
 mod norm;
 use norm::{CompactNorm, FieldNorm, ProductNorm};
+#[cfg(target_arch = "aarch64")]
+mod p64_mass;
 mod prefix_cache;
 mod prepared_linear_lane;
 mod quotient_prefix;

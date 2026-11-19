@@ -131,7 +131,7 @@ fn partitioned_fold_matches_scalar_for_window_grid_challenges() {
         .collect::<Vec<_>>();
     for (block, challenge) in challenges.iter().enumerate() {
         assert_eq!(
-            WindowedChallenge::new::<D>(challenge, I8DigitSpan::Half).is_some(),
+            WindowedChallenge::new::<D>(challenge, I8DigitSpan::Half, 64).is_some(),
             block != OFF_GRID_BLOCK,
         );
     }

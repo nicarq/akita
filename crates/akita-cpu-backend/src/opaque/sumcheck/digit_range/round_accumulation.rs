@@ -248,10 +248,7 @@ fn accumulate_p64_class_block<E: Field + 'static>(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn p64_wide_bins_match_direct_exact_reduction() {
-        check_blocked_accumulation_with_inner_len::<Ext2<Prime64Offset59>>(1024);
-    }
+    include!("round_accumulation/tests/wide_bins.rs");
     use super::super::MAX_TREE_STAGE_Q_DEGREE;
     use super::*;
     use jolt_field::{FpExt4, Prime128Offset275, Prime32Offset99, Ring};

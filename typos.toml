@@ -1,4 +1,6 @@
 [default.extend-words]
+SME = "SME"
+sme = "sme"
 MSIS = "MSIS"
 msis = "msis"
 nd = "nd"

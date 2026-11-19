@@ -197,6 +197,24 @@ where
                 });
             }
             let live_coeff_len = poly.nonzero_coeff_len();
+            #[cfg(akita_packing_sme)]
+            if let Some(packing) = poly
+                .fixed_fold_ntt
+                .as_ref()
+                .and_then(|cache| cache.packing.as_ref())
+            {
+                if let Some(coordinates) = packing.contract::<F, E, D>(
+                    RootPolyMeta::<F>::num_vars(*poly),
+                    live_coeff_len,
+                    fused_weights,
+                )? {
+                    return SubringCoefficientPackingPartials::new(
+                        point.geometry(),
+                        point.num_live_blocks(),
+                        coordinates,
+                    );
+                }
+            }
             let coordinates = seam_packing_partials(
                 &rings,
                 live_coeff_len,

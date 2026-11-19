@@ -32,6 +32,8 @@ pub(super) struct FixedFoldNtt {
     twiddles: NttTwiddles<i32, SUBRING_D>,
     ntt: NttKernelPlan,
     dot: Dot,
+    #[cfg(akita_packing_sme)]
+    pub(super) packing: Option<super::packing_sme::PackingStripes>,
 }
 
 impl std::fmt::Debug for FixedFoldNtt {
@@ -111,6 +113,8 @@ impl FixedFoldNtt {
             twiddles,
             ntt,
             dot,
+            #[cfg(akita_packing_sme)]
+            packing: super::packing_sme::PackingStripes::new(rings, positions),
         })
     }
 

@@ -92,7 +92,8 @@ fn prepare_challenge<const D: usize>(
         return prepare_wide_plan(challenge);
     };
     if contribution_bound <= i16::MAX as u64 {
-        let windowed = window_span.and_then(|span| WindowedChallenge::new::<D>(challenge, span));
+        let windowed = window_span
+            .and_then(|span| WindowedChallenge::new::<D>(challenge, span, digit_abs_bound));
         return ChallengePlan::NarrowFull(contribution_bound, windowed);
     }
 

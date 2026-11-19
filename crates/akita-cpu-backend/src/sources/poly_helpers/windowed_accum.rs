@@ -18,6 +18,9 @@
 
 use akita_challenges::SparseChallenge;
 
+#[cfg(target_arch = "aarch64")]
+mod shifted;
+
 /// Coefficients per gathered window: one 128-bit vector of `i8` digits.
 pub(super) const WINDOW: usize = 16;
 
@@ -67,7 +70,7 @@ struct SignedPlane<const D: usize> {
 /// word packs [`WORD_OFFSETS`] [`SignedPlane`] offsets; unused slots point at
 /// the zeros. `corrections[window]` is the weighted number of complemented
 /// sources in that window's list.
-pub(crate) struct WindowedChallenge {
+struct AlignedWindows {
     words: Vec<u64>,
     // The x86 kernels read negated sources, which need no correction.
     #[cfg_attr(all(target_arch = "x86_64", target_feature = "avx2"), allow(dead_code))]
@@ -79,7 +82,41 @@ pub(crate) struct WindowedChallenge {
     span: I8DigitSpan,
 }
 
+pub(crate) struct WindowedChallenge(Windows);
+
+enum Windows {
+    Aligned(AlignedWindows),
+    #[cfg(target_arch = "aarch64")]
+    Shifted(shifted::ShiftedWindows),
+}
+
 impl WindowedChallenge {
+    pub(super) fn new<const D: usize>(
+        challenge: &SparseChallenge,
+        span: I8DigitSpan,
+        digit_abs_bound: u64,
+    ) -> Option<Self> {
+        if let Some(aligned) = AlignedWindows::new::<D>(challenge, span) {
+            return Some(Self(Windows::Aligned(aligned)));
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            shifted::ShiftedWindows::new::<D>(
+                &challenge.positions,
+                &challenge.coeffs,
+                digit_abs_bound,
+            )
+            .map(|windows| Self(Windows::Shifted(windows)))
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let _ = digit_abs_bound;
+            None
+        }
+    }
+}
+
+impl AlignedWindows {
     /// Build the gather lists, or `None` when the challenge is not a sum of
     /// whole-window shifts with coefficients of magnitude one or two in a
     /// degree-`D` ring.
@@ -199,6 +236,14 @@ pub(super) fn windowed_mul_acc<const D: usize>(
     challenge: &WindowedChallenge,
     acc: &mut [i16; D],
 ) {
+    let challenge = match &challenge.0 {
+        Windows::Aligned(aligned) => aligned,
+        #[cfg(target_arch = "aarch64")]
+        Windows::Shifted(shifted) => {
+            shifted.add(digit_plane, acc);
+            return;
+        }
+    };
     assert!(D.is_multiple_of(GATHER));
     assert_eq!(
         challenge.words.len(),
@@ -228,7 +273,7 @@ pub(super) fn windowed_mul_acc<const D: usize>(
         for ((acc_window, words), &correction) in windows {
             let (once, twice) = words.split_at(challenge.once_words);
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: `WindowedChallenge::new::<D>` only packs offsets of
+            // SAFETY: `AlignedWindows::new::<D>` only packs offsets of
             // whole windows inside a `SignedPlane<D>`, and the length check
             // above ties the table to this `D`; `acc_window` is exactly one
             // window; NEON is baseline on aarch64.
@@ -418,7 +463,7 @@ mod neon {
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 mod x86 {
-    use super::{WindowedChallenge, GATHER, WINDOW, WORD_OFFSETS};
+    use super::{AlignedWindows, GATHER, WINDOW, WORD_OFFSETS};
     use std::arch::x86_64::*;
 
     /// A digit plane widened to `i16`, its negation and zeros, so one offset
@@ -503,13 +548,13 @@ mod x86 {
     ///
     /// # Safety
     ///
-    /// `challenge` must hold the table `WindowedChallenge::new::<D>` built,
+    /// `challenge` must hold the table `AlignedWindows::new::<D>` built,
     /// and the build must enable AVX2 (and AVX-512BW when [`GATHER`] is two
     /// windows).
     #[inline(always)]
     pub(super) unsafe fn accumulate<const D: usize>(
         digit_plane: &[i8; D],
-        challenge: &WindowedChallenge,
+        challenge: &AlignedWindows,
         acc: &mut [i16; D],
     ) {
         let mut wide = WidePlane {
@@ -591,7 +636,7 @@ mod tests {
             positions: positions.into(),
             coeffs: coeffs.into(),
         };
-        let windowed = WindowedChallenge::new::<D>(&challenge, span).unwrap();
+        let windowed = WindowedChallenge::new::<D>(&challenge, span, 128).unwrap();
         let mut actual = [7i16; D];
         windowed_mul_acc(&plane, &windowed, &mut actual);
         assert_eq!(actual, expected);
@@ -633,16 +678,20 @@ mod tests {
             positions: vec![0, 8].into(),
             coeffs: vec![1, -1].into(),
         };
-        assert!(WindowedChallenge::new::<64>(&off_grid, I8DigitSpan::Full).is_none());
+        assert!(WindowedChallenge::new::<64>(&off_grid, I8DigitSpan::Full, 128).is_none());
         let wide_coefficient = SparseChallenge {
             positions: vec![0, 16].into(),
             coeffs: vec![1, 3].into(),
         };
-        assert!(WindowedChallenge::new::<64>(&wide_coefficient, I8DigitSpan::Full).is_none());
+        assert!(WindowedChallenge::new::<64>(&wide_coefficient, I8DigitSpan::Full, 128).is_none());
         let out_of_ring = SparseChallenge {
             positions: vec![64].into(),
             coeffs: vec![1].into(),
         };
-        assert!(WindowedChallenge::new::<64>(&out_of_ring, I8DigitSpan::Full).is_none());
+        assert!(WindowedChallenge::new::<64>(&out_of_ring, I8DigitSpan::Full, 128).is_none());
     }
 }
+
+#[cfg(all(test, target_arch = "aarch64"))]
+#[path = "windowed_accum/tests/shifted.rs"]
+mod shifted_tests;

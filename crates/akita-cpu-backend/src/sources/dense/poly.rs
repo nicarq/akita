@@ -8,10 +8,14 @@ use akita_error::{checked, AkitaError};
 use akita_params::SUPPORTED_COMMITMENT_RING_DIMS;
 use akita_types::{AkitaExpandedSetup, RingVec};
 use jolt_field::solinas::parallel::*;
-use jolt_field::{CanonicalEncoding, Field};
+use jolt_field::{CanonicalEncoding, Field, Fp64};
 use std::borrow::Cow;
 use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
+
+#[cfg(test)]
+#[path = "tests/shared_words.rs"]
+mod shared_words_tests;
 
 const MAX_DENSE_DIGIT_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
@@ -73,6 +77,10 @@ pub struct DensePoly<F: Field> {
 #[derive(Debug, Clone)]
 enum DenseCoefficients<F: Field> {
     Owned(RingVec<F>),
+    SharedCanonicalWords {
+        words: Arc<Vec<u64>>,
+        view: unsafe fn(&[u64]) -> &[F],
+    },
     SetupPrefix {
         setup: Arc<AkitaExpandedSetup<F>>,
         len: usize,
@@ -131,6 +139,8 @@ impl<F: Field> DensePoly<F> {
     pub fn field_coeffs(&self) -> &[F] {
         match &self.coeffs {
             DenseCoefficients::Owned(coeffs) => coeffs.coeffs(),
+            // SAFETY: Only the checked constructor can install this view.
+            DenseCoefficients::SharedCanonicalWords { words, view } => unsafe { view(words) },
             // The constructor checks this bound; the setup is immutable.
             DenseCoefficients::SetupPrefix { setup, len } => {
                 &setup.shared_matrix().as_field_slice()[..*len]
@@ -189,6 +199,50 @@ impl<F: Field> DensePoly<F> {
             ))
         })?;
         Ok(as_ring_view::<F, D>(live))
+    }
+}
+
+unsafe fn fp64_word_view<const P: u64>(words: &[u64]) -> &[Fp64<P>] {
+    // SAFETY: Fp64 is transparent over u64. The caller checks each residue.
+    unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len()) }
+}
+
+impl<const P: u64> DensePoly<Fp64<P>> {
+    /// Share an immutable canonical prefix. Coefficients after it are zero.
+    ///
+    /// # Errors
+    ///
+    /// The prefix must fit the domain and implementation ring alignment.
+    /// Every word must be a canonical residue of the base field.
+    pub fn from_shared_canonical_u64_prefix(
+        num_vars: usize,
+        words: Arc<Vec<u64>>,
+    ) -> Result<Self, AkitaError> {
+        let domain = checked::pow2(num_vars).ok_or_else(|| {
+            AkitaError::InvalidInput("shared dense domain size overflows usize".into())
+        })?;
+        if words.len() > domain || !words.len().is_multiple_of(MIN_FLAT_COEFF_LEN) {
+            return Err(AkitaError::InvalidInput(
+                "shared dense prefix extent is invalid".into(),
+            ));
+        }
+        if !cfg_iter!(words.as_slice()).all(|&word| word < P) {
+            return Err(AkitaError::InvalidInput(
+                "shared dense prefix contains a noncanonical word".into(),
+            ));
+        }
+        // SAFETY: The immutable input was checked above.
+        let nonzero_coeff_len = nonzero_prefix_len(unsafe { fp64_word_view::<P>(&words) });
+        Ok(Self {
+            num_vars,
+            coeffs: DenseCoefficients::SharedCanonicalWords {
+                words,
+                view: fp64_word_view::<P>,
+            },
+            nonzero_coeff_len,
+            digit_cache: OnceLock::new(),
+            fixed_fold_ntt: None,
+        })
     }
 }
 
