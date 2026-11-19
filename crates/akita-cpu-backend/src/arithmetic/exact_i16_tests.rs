@@ -98,6 +98,55 @@ fn dense_i16_commit_matches_schoolbook_composition() {
     run_exact_i16_test(dense_i16_commit_matches_schoolbook_composition_inner);
 }
 
+#[test]
+fn dense_i16_commit_reuses_only_equal_uniform_blocks() {
+    run_exact_i16_test(|| {
+        let prepared = prepared();
+        let log_basis = 11;
+        let num_digits = compute_num_digits_field_width(F::MODULUS_BITS, log_basis);
+        let constant = CyclotomicRing::from_coefficients([F::from_i64(-401); D]);
+        let mut different = [F::from_i64(-401); D];
+        different[D / 2] = F::one();
+        let rings = [
+            constant,
+            constant,
+            constant,
+            constant,
+            constant,
+            CyclotomicRing::from_coefficients(different),
+            constant,
+        ];
+        let params = BalancedDecomposePow2Params::new(num_digits, log_basis);
+        let source = LiveRings {
+            coeffs: &rings,
+            params: &params,
+            basis: SignedDigitBasis::new(log_basis).unwrap(),
+        };
+        let commit = |ranges| {
+            super::exact_i16::commit_rows_i16(
+                &prepared,
+                2,
+                2 * num_digits,
+                &source,
+                ranges,
+                DigitShape {
+                    log_basis,
+                    num_digits,
+                },
+            )
+            .unwrap()
+        };
+        let blocks = [0..2, 2..4, 4..6, 6..7, 7..7];
+        let rows = commit(&blocks);
+        for (block, row) in blocks.iter().zip(&rows) {
+            assert_eq!(
+                commit(std::slice::from_ref(block)).as_slice(),
+                std::slice::from_ref(row)
+            );
+        }
+    });
+}
+
 fn run_exact_i16_test(test: fn()) {
     std::thread::Builder::new()
         .name("dense-i16-schoolbook-test".into())

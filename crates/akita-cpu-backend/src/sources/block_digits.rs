@@ -9,6 +9,7 @@ use akita_algebra::CyclotomicRing;
 use akita_challenges::SparseChallenge;
 use akita_error::AkitaError;
 use akita_params::SignedDigitKernel;
+use jolt_field::solinas::parallel::*;
 use jolt_field::{CanonicalEncoding, Field};
 use std::ops::Range;
 
@@ -27,6 +28,12 @@ pub(crate) trait RingValues<F: Field, const D: usize> {
 impl<F: Field, const D: usize> RingValues<F, D> for &[F; D] {
     fn coeff(&self, k: usize) -> F {
         self[k]
+    }
+}
+
+impl<F: Field, const D: usize> RingValues<F, D> for CyclotomicRing<F, D> {
+    fn coeff(&self, k: usize) -> F {
+        self.coefficients()[k]
     }
 }
 
@@ -49,6 +56,9 @@ pub(crate) trait RingValueSource<F: Field, const D: usize>: Sync {
 
     fn num_rings(&self) -> usize;
     fn values(&self, ring: usize) -> Result<Self::Values<'_>, AkitaError>;
+    fn packed_digits(&self) -> Option<PackedSignedDigitView<'_>> {
+        None
+    }
 }
 
 impl<F: Field, const D: usize> RingValueSource<F, D> for &[CyclotomicRing<F, D>] {
@@ -76,6 +86,9 @@ pub(crate) trait BlockDigits<const D: usize>: Sync {
         Self: 'a;
 
     fn num_rings(&self) -> usize;
+    fn rings_repeat_within_full_blocks(&self, _rings: Range<usize>, _block_width: usize) -> bool {
+        false
+    }
     fn scratch(&self, shape: DigitShape, max_rings: usize) -> Self::Scratch;
     fn digit_abs_bound(&self, shape: DigitShape) -> u64;
     fn i8_digit_span(&self, shape: DigitShape) -> Option<I8DigitSpan>;
@@ -105,6 +118,10 @@ pub(crate) trait I8Rows<const D: usize>: Sync {
 
 pub(crate) trait I16Rows<const D: usize>: Sync {
     type I16Scratch: Send;
+
+    fn uniform_block_value(&self, _rings: Range<usize>) -> Option<u128> {
+        None
+    }
 
     fn i16_scratch(&self, shape: DigitShape, max_rings: usize) -> Self::I16Scratch;
     fn i16_rows<'a>(
@@ -208,6 +225,22 @@ impl<F: Field + CanonicalEncoding, const D: usize> BlockDigits<D> for LiveRings<
     fn num_rings(&self) -> usize {
         self.coeffs.len()
     }
+    fn rings_repeat_within_full_blocks(&self, rings: Range<usize>, block_width: usize) -> bool {
+        let rings = &self.coeffs[rings];
+        if block_width <= 1
+            || !rings.len().is_multiple_of(block_width)
+            || !rings
+                .first()
+                .zip(rings.get(1))
+                .is_some_and(|(first, next)| first == next)
+        {
+            return false;
+        }
+        cfg_chunks!(rings, block_width).all(|block| {
+            let (first, rest) = block.split_first().expect("full block is nonempty");
+            rest.iter().all(|ring| ring == first)
+        })
+    }
     fn digit_abs_bound(&self, _shape: DigitShape) -> u64 {
         self.basis.abs_bound
     }
@@ -278,6 +311,23 @@ impl<F: Field + CanonicalEncoding, const D: usize> I8Rows<D> for LiveRings<'_, F
 
 impl<F: Field + CanonicalEncoding, const D: usize> I16Rows<D> for LiveRings<'_, F, D> {
     type I16Scratch = Vec<[i16; D]>;
+
+    fn uniform_block_value(&self, rings: Range<usize>) -> Option<u128> {
+        let rings = self.coeffs.get(rings)?;
+        let value = rings.first()?.coefficients().first()?;
+        if rings.last()?.coefficients().last()? != value {
+            return None;
+        }
+        if rings
+            .iter()
+            .all(|ring| ring.coefficients().iter().all(|cell| cell == value))
+        {
+            value.to_u128_checked()
+        } else {
+            None
+        }
+    }
+
     fn i16_scratch(&self, shape: DigitShape, max_rings: usize) -> Self::I16Scratch {
         vec![[0; D]; shape.num_digits * max_rings]
     }
@@ -314,6 +364,9 @@ impl<F: Field, const D: usize> RingValueSource<F, D> for PackedDigits<'_> {
     }
     fn values(&self, ring: usize) -> Result<Self::Values<'_>, AkitaError> {
         self.digits.decode_array(ring * D)
+    }
+    fn packed_digits(&self) -> Option<PackedSignedDigitView<'_>> {
+        Some(self.digits)
     }
 }
 

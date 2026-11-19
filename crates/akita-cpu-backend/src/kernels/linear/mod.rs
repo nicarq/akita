@@ -63,6 +63,7 @@ pub use fused_quotients::{
 };
 pub(crate) use fused_quotients::{
     fused_quotient_matrix_extent, fused_split_eq_quotients_streamed_prover_bounds,
+    small_field_matrix_a_quotients_with_tail,
 };
 pub(crate) use ntt_matvec::mat_vec_mul_ntt_blocks_i8;
 pub use ntt_matvec::mat_vec_mul_ntt_digits_i8;

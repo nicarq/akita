@@ -367,6 +367,7 @@ pub(crate) trait DenseCoefficientSource<F: Field>: Send + Sync {
 pub(crate) enum DenseRepresentation<'a, F: Field> {
     /// Canonical field coefficients.
     Coefficients(&'a dyn DenseCoefficientSource<F>),
+    FieldRuns(&'a crate::FieldRunPoly<F>),
     /// Borrowed signed integer blocks.
     SignedBlocks(SignedBlocks<'a>),
 }
@@ -563,9 +564,9 @@ impl<'a, F: Field> PolynomialRepresentation<'a, F> {
 
     fn polynomial_type(&self) -> Result<PolynomialType, AkitaError> {
         match self {
-            Self::Dense(DenseRepresentation::Coefficients(_)) => {
-                Ok(PolynomialType::Dense(DenseType::Coefficients))
-            }
+            Self::Dense(
+                DenseRepresentation::Coefficients(_) | DenseRepresentation::FieldRuns(_),
+            ) => Ok(PolynomialType::Dense(DenseType::Coefficients)),
             Self::Dense(DenseRepresentation::SignedBlocks(_)) => {
                 Ok(PolynomialType::Dense(DenseType::SignedBlocks))
             }

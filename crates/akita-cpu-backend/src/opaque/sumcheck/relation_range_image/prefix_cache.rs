@@ -19,6 +19,22 @@ pub(super) enum PrefixBasis {
     B16,
 }
 
+pub(super) const BASIS16_MARGINAL_COUNT: usize = 249;
+const BASIS16_MARGINAL_START: [usize; 9] = [0, 16, 32, 63, 79, 95, 126, 157, 188];
+const BASIS16_MARGINAL_BIAS: [i16; 9] = [8, 8, 15, 8, 8, 15, 15, 15, 30];
+
+#[inline(always)]
+pub(super) fn add_basis16_marginals<E: Field>(bins: &mut [E], class: u16, weight: E) {
+    if matches!(class, 0x7777 | 0x8888) {
+        return;
+    }
+    let [a, b, c, d] = [0, 4, 8, 12].map(|shift| ((class >> shift) & 15) as i16 - 8);
+    let values = [a, c, c - a, b, d, d - b, b - a, d - c, d - c - b + a];
+    for i in 0..9 {
+        bins[BASIS16_MARGINAL_START[i] + (values[i] + BASIS16_MARGINAL_BIAS[i]) as usize] += weight;
+    }
+}
+
 /// Range-image grid values of one basis-16 quad class.
 ///
 /// Basis 16 has `2^16` classes, so its rows are computed during the single
@@ -83,14 +99,48 @@ impl<E: Field + Unreduced> Stage2PrefixCache<E> {
         }
         let grid: [E; STAGE2_PREFIX_POINT_COUNT] =
             std::array::from_fn(|point| reduce_signed_accum::<E>(pos[point], neg[point]));
-        Ok(Self {
+        Ok(Self::from_grid(grid, tau0, tau1, batching_coeff))
+    }
+
+    pub(super) fn from_basis16_marginals(bins: &[E], tau0: E, tau1: E, batching_coeff: E) -> Self {
+        debug_assert_eq!(bins.len(), BASIS16_MARGINAL_COUNT);
+        let grid = std::array::from_fn(|point| {
+            let start = BASIS16_MARGINAL_START[point];
+            let end = BASIS16_MARGINAL_START
+                .get(point + 1)
+                .copied()
+                .unwrap_or(bins.len());
+            let mut sum = E::SmallProduct::zero();
+            for (index, &weight) in bins[start..end].iter().enumerate() {
+                let x = index as i16 - BASIS16_MARGINAL_BIAS[point];
+                let value = if matches!(point, 0 | 1 | 3 | 4) {
+                    x * (x + 1)
+                } else {
+                    x * x
+                };
+                if value != 0 {
+                    sum += weight.mul_u64_unreduced(value as u64);
+                }
+            }
+            E::reduce_small_product(sum)
+        });
+        Self::from_grid(grid, tau0, tau1, batching_coeff)
+    }
+
+    fn from_grid(
+        grid: [E; STAGE2_PREFIX_POINT_COUNT],
+        tau0: E,
+        tau1: E,
+        batching_coeff: E,
+    ) -> Self {
+        Self {
             norm_x_row_coeffs: std::array::from_fn(|y| {
                 quadratic_coeffs_from_01_inf(grid[y], grid[3 + y], grid[6 + y])
             }),
             tau0,
             tau1,
             batching_coeff,
-        })
+        }
     }
 }
 

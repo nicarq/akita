@@ -23,12 +23,18 @@
 //!   into challenge-scaled copies of the two-round quad fold. The last prefix
 //!   round writes the folded witness for the ordinary suffix path.
 
-use super::prefix_cache::{PrefixBasis, Stage2PrefixCache};
+use super::prefix_cache::{
+    add_basis16_marginals, PrefixBasis, Stage2PrefixCache, BASIS16_MARGINAL_COUNT,
+};
 use super::wide_mass::WideMass;
 use super::*;
 use crate::opaque::sumcheck::relation_range_image::evaluation_trace::PreparedLaneWeights;
 use crate::opaque::sumcheck::{add_assign_all, parallel_tasks, sum_partials};
 use akita_algebra::eq_poly::EqPolynomial;
+
+#[path = "constant_quad_norms.rs"]
+mod constant_quad_norms;
+use self::constant_quad_norms::ConstantQuadNorms;
 
 /// Maximum number of coefficient rounds served from the compact witness.
 const MAX_PREFIX_ROUNDS: usize = 6;
@@ -39,6 +45,8 @@ const MIN_SCAN_TASK_LANES: usize = 256;
 
 /// Lanes the scan decodes and adds to the relation masses together.
 const SCAN_CHUNK_LANES: usize = 256;
+const HISTOGRAM_LOG_TILE: usize = 4;
+const HISTOGRAM_TILE: usize = 1 << HISTOGRAM_LOG_TILE;
 
 /// Minimum folded-witness pairs per parallel lookup-round task.
 const MIN_LOOKUP_TASK_PAIRS: usize = 1 << 12;
@@ -93,6 +101,7 @@ fn quad_class<const DIGIT_BITS: usize>(quad: [i8; 4]) -> u16 {
 
 struct ScanLayout<'a, E: Field> {
     witness: PackedSignedDigitView<'a>,
+    packed_lanes: bool,
     lane_weights: &'a [E],
     linear_terms: &'a PreparedProverLinearTerms<E>,
     /// First source-mass block of each linear source.
@@ -100,6 +109,7 @@ struct ScanLayout<'a, E: Field> {
     source_block_count: usize,
     eq_low: &'a [E],
     eq_high: &'a [E],
+    eq_tile: Option<&'a [E]>,
     tau2: E,
     b: usize,
     coeff_count: usize,
@@ -379,6 +389,89 @@ impl<E: Field + Unreduced + 'static, const MAX_DIGIT_BASIS: usize> BlockRows<E, 
     }
 }
 
+#[inline(always)]
+fn add_paired_class<E: Field>(
+    histograms: &mut [&mut [E]; 3],
+    delta_code: &[i32],
+    delta_offset: i32,
+    [even, odd]: [u16; 2],
+    weight: E,
+) {
+    let (even, odd) = (usize::from(even), usize::from(odd));
+    histograms[0][even] += weight;
+    histograms[1][odd] += weight;
+    if !histograms[2].is_empty() {
+        let delta = delta_code[odd] - delta_code[even] + delta_offset;
+        histograms[2][delta as usize] += weight;
+    }
+}
+
+fn add_class_tiles<E: Field>(
+    classes: &[[u16; 2]],
+    first_pair: usize,
+    [eq_low, eq_high, eq_tile]: [&[E]; 3],
+    delta_code: &[i32],
+    delta_offset: i32,
+    histograms: &mut [&mut [E]; 3],
+) {
+    debug_assert!(first_pair.is_multiple_of(HISTOGRAM_TILE));
+    debug_assert!(classes.len().is_multiple_of(HISTOGRAM_TILE));
+    let low_mask = eq_low.len() - 1;
+    let low_bits = eq_low.len().trailing_zeros();
+    for (tile_index, tile) in classes.as_chunks::<HISTOGRAM_TILE>().0.iter().enumerate() {
+        let pair = first_pair + tile_index * HISTOGRAM_TILE;
+        let low_start = pair & low_mask;
+        let high = eq_high[pair >> low_bits];
+        if tile[1..].iter().all(|&entry| entry == tile[0]) {
+            let weight = high * eq_tile[low_start >> HISTOGRAM_LOG_TILE];
+            add_paired_class(histograms, delta_code, delta_offset, tile[0], weight);
+        } else {
+            let low = &eq_low[low_start..low_start + HISTOGRAM_TILE];
+            for (&entry, &weight) in tile.iter().zip(low) {
+                add_paired_class(histograms, delta_code, delta_offset, entry, high * weight);
+            }
+        }
+    }
+}
+
+fn zero_chunk_weight<E: Field>(
+    eq_tile: &[E],
+    eq_high: &[E],
+    first_pair: usize,
+    pair_count: usize,
+) -> E {
+    let width = eq_tile.len();
+    let mut tile = first_pair / HISTOGRAM_TILE;
+    let end = tile + pair_count / HISTOGRAM_TILE;
+    let mut weight = E::zero();
+    while tile < end {
+        let high = tile / width;
+        let low = tile % width;
+        let count = (width - low).min(end - tile);
+        let low_weight = if count == width {
+            E::one()
+        } else {
+            eq_tile[low..low + count]
+                .iter()
+                .copied()
+                .fold(E::zero(), |a, b| a + b)
+        };
+        weight += low_weight * eq_high[high];
+        tile += count;
+    }
+    weight
+}
+
+fn active_packed_lanes(bytes: &[[u8; 48]]) -> [u64; SCAN_CHUNK_LANES / 64] {
+    let mut active = [0; SCAN_CHUNK_LANES / 64];
+    for (bits, lanes) in active.iter_mut().zip(bytes.chunks(64)) {
+        *bits = lanes.iter().enumerate().fold(0, |mask, (lane, bytes)| {
+            mask | (u64::from(*bytes != [0; 48]) << lane)
+        });
+    }
+    active
+}
+
 /// Scan the lanes whose quad classes `classes` receives.
 ///
 /// With at least eight coefficients per lane, the round-2 pair of a quad is the
@@ -396,6 +489,7 @@ fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
     let low_mask = layout.eq_low.len() - 1;
     let low_bits = layout.eq_low.len().trailing_zeros();
     let one_minus_tau2 = E::one() - layout.tau2;
+    let zero_class = quad_class::<DIGIT_BITS>([0; 4]);
 
     let mut alpha_mass = WideMass::<E>::new(1, coeff_count, layout.b);
     let mut source_mass = WideMass::<E>::new(layout.source_block_count, coeff_count, layout.b);
@@ -403,8 +497,15 @@ fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
     let mut digits = vec![0i8; chunk_lanes * coeff_count];
     let mut alpha_rows = Vec::with_capacity(chunk_lanes);
     let mut source_rows = BlockRows::<E>::new(layout.source_block_count);
-    let mut even_histogram = vec![E::zero(); layout.class_count];
-    let mut odd_histogram = if split_pairs {
+    let mut even_histogram = vec![
+        E::zero();
+        if DIGIT_BITS == 4 {
+            BASIS16_MARGINAL_COUNT
+        } else {
+            layout.class_count
+        }
+    ];
+    let mut odd_histogram = if split_pairs && DIGIT_BITS != 4 {
         vec![E::zero(); layout.class_count]
     } else {
         Vec::new()
@@ -415,31 +516,65 @@ fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
         let chunk_first = first_lane + chunk * chunk_lanes;
         let lanes = chunk_classes.len() / quads_per_lane;
         let digits = &mut digits[..lanes * coeff_count];
+        let range = chunk_first * coeff_count..(chunk_first + lanes) * coeff_count;
+        let packed = layout
+            .packed_lanes
+            .then(|| layout.witness.aligned_bytes(range.clone()))
+            .flatten();
+        let active = packed.map(|encoded| active_packed_lanes(encoded.as_chunks::<48>().0));
+        let is_active =
+            |row: usize| active.is_none_or(|bits| bits[row / 64] & (1 << (row % 64)) != 0);
+        if active.is_some_and(|bits| bits == [0; SCAN_CHUNK_LANES / 64]) {
+            let pairs_per_lane = quads_per_lane / 2;
+            let tiles = layout
+                .eq_tile
+                .expect("packed scan requires aligned equality tiles");
+            let weight = zero_chunk_weight(
+                tiles,
+                layout.eq_high,
+                chunk_first * pairs_per_lane,
+                lanes * pairs_per_lane,
+            );
+            chunk_classes.fill(zero_class);
+            add_paired_class(
+                &mut [
+                    even_histogram.as_mut_slice(),
+                    odd_histogram.as_mut_slice(),
+                    delta_histogram.as_mut_slice(),
+                ],
+                layout.delta_code,
+                layout.delta_offset,
+                [zero_class; 2],
+                weight,
+            );
+            continue;
+        }
         layout
             .witness
-            .decode_range(chunk_first * coeff_count, digits)
+            .decode_range(range.start, digits)
             .expect("compact prefix lanes are in bounds");
-
         alpha_rows.clear();
-        alpha_rows.extend(
-            layout.lane_weights[chunk_first..chunk_first + lanes]
-                .iter()
-                .zip(0u32..)
-                .map(|(&weight, row)| (weight, row)),
-        );
-        alpha_mass.add_rows(0, &alpha_rows, digits);
-        for row in 0..lanes {
+        for (row, &weight) in layout.lane_weights[chunk_first..chunk_first + lanes]
+            .iter()
+            .enumerate()
+        {
+            if !is_active(row) {
+                continue;
+            }
+            let row_id = row as u32;
+            alpha_rows.push((weight, row_id));
             layout.linear_terms.for_each_source_term(
                 chunk_first + row,
                 |factor, source_index, source_lane| {
                     source_rows.push(
                         layout.source_blocks[source_index] + source_lane,
                         factor,
-                        row as u32,
+                        row_id,
                     );
                 },
             );
         }
+        alpha_mass.add_rows(0, &alpha_rows, digits);
         source_rows.add_to(&mut source_mass, digits);
 
         for ((local_lane, lane_classes), lane_digits) in chunk_classes
@@ -448,23 +583,54 @@ fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
             .zip(digits.chunks_exact(coeff_count))
         {
             let lane = chunk_first + local_lane;
-            for (class, &quad) in lane_classes.iter_mut().zip(lane_digits.as_chunks::<4>().0) {
-                *class = quad_class::<DIGIT_BITS>(quad);
+            if is_active(local_lane) {
+                for (class, &quad) in lane_classes.iter_mut().zip(lane_digits.as_chunks::<4>().0) {
+                    *class = quad_class::<DIGIT_BITS>(quad);
+                }
+            } else {
+                lane_classes.fill(zero_class);
             }
 
             if split_pairs {
-                let first_pair = lane * (quads_per_lane / 2);
-                for (pair_offset, pair) in lane_classes.chunks_exact(2).enumerate() {
+                let pairs = lane_classes.as_chunks::<2>().0;
+                let first_pair = lane * pairs.len();
+                let mut histograms = [
+                    even_histogram.as_mut_slice(),
+                    odd_histogram.as_mut_slice(),
+                    delta_histogram.as_mut_slice(),
+                ];
+                if let Some(eq_tile) = layout.eq_tile {
+                    add_class_tiles(
+                        pairs,
+                        first_pair,
+                        [layout.eq_low, layout.eq_high, eq_tile],
+                        layout.delta_code,
+                        layout.delta_offset,
+                        &mut histograms,
+                    );
+                    continue;
+                }
+                for (pair_offset, &pair) in pairs.iter().enumerate() {
                     let pair_index = first_pair + pair_offset;
                     let weight = layout.eq_low[pair_index & low_mask]
                         * layout.eq_high[pair_index >> low_bits];
-                    let (even, odd) = (usize::from(pair[0]), usize::from(pair[1]));
-                    even_histogram[even] += weight;
-                    odd_histogram[odd] += weight;
-                    if !delta_histogram.is_empty() {
-                        let delta =
-                            layout.delta_code[odd] - layout.delta_code[even] + layout.delta_offset;
-                        delta_histogram[delta as usize] += weight;
+                    if DIGIT_BITS == 4 {
+                        let [even, odd] = pair;
+                        if even == odd {
+                            add_basis16_marginals(histograms[0], even, weight);
+                        } else {
+                            let odd_weight = layout.tau2 * weight;
+                            add_basis16_marginals(histograms[0], even, weight - odd_weight);
+                            add_basis16_marginals(histograms[0], odd, odd_weight);
+                        }
+                    } else {
+                        add_paired_class(
+                            &mut histograms,
+                            layout.delta_code,
+                            layout.delta_offset,
+                            pair,
+                            weight,
+                        );
                     }
                 }
             } else {
@@ -477,7 +643,11 @@ fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
                 let weight = side
                     * layout.eq_low[pair_index & low_mask]
                     * layout.eq_high[pair_index >> low_bits];
-                even_histogram[usize::from(lane_classes[0])] += weight;
+                if DIGIT_BITS == 4 {
+                    add_basis16_marginals(&mut even_histogram, lane_classes[0], weight);
+                } else {
+                    even_histogram[usize::from(lane_classes[0])] += weight;
+                }
             }
         }
     }
@@ -488,6 +658,23 @@ fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
         even_histogram,
         odd_histogram,
         delta_histogram,
+    }
+}
+
+fn append_basis16_table<E: Field>(table: &mut Vec<E>, weights: [E; 4]) {
+    let [d0, d1, d2, d3] = weights
+        .map(|weight| std::array::from_fn::<_, 16, _>(|i| weight * E::from_i64(i as i64 - 8)));
+    let mut lower = [E::zero(); 256];
+    for (&high, row) in d1.iter().zip(lower.chunks_exact_mut(16)) {
+        for (out, &low) in row.iter_mut().zip(&d0) {
+            *out = high + low;
+        }
+    }
+    for &high in &d3 {
+        for &low in &d2 {
+            let upper = high + low;
+            table.extend(lower.iter().map(|&x| x + upper));
+        }
     }
 }
 
@@ -518,23 +705,69 @@ fn lookup_pairs<E: Field + Unreduced, const G: usize, const SKIP_LINEAR: bool>(
         value
     };
 
+    const LOOKUP_TILE_PAIRS: usize = 64;
+    let mut lookup_tile = [[E::zero(); 2]; LOOKUP_TILE_PAIRS];
+    let tile_pairs = if G == 2 && class_count <= 4096 {
+        16
+    } else {
+        LOOKUP_TILE_PAIRS
+    };
+    let materialize = out.is_some();
     let mut totals = [E::zero(); 3];
     let mut block_start = pairs.start;
     while block_start < pairs.end {
         let high = block_start >> low_bits;
         let block_end = ((high + 1) << low_bits).min(pairs.end);
         let mut inner = ProductNorm::<E, SKIP_LINEAR>::zero();
-        for pair in block_start..block_end {
-            let w0 = fold_entry(2 * pair);
-            let w1 = fold_entry(2 * pair + 1);
-            if let Some(out) = out.as_deref_mut() {
-                let local = 2 * (pair - pairs.start);
-                out[local] = w0;
-                out[local + 1] = w1;
+        if G == 1 {
+            for pair in block_start..block_end {
+                let w0 = fold_entry(2 * pair);
+                let w1 = fold_entry(2 * pair + 1);
+                if let Some(out) = out.as_deref_mut() {
+                    let local = 2 * (pair - pairs.start);
+                    out[local] = w0;
+                    out[local + 1] = w1;
+                }
+                let dw = w1 - w0;
+                let e_in = eq_low[pair & low_mask];
+                inner.add(w0, dw, e_in);
             }
-            let dw = w1 - w0;
-            let e_in = eq_low[pair & low_mask];
-            inner.add(w0, dw, e_in);
+        } else {
+            for start in (block_start..block_end).step_by(tile_pairs) {
+                let end = (start + tile_pairs).min(block_end);
+                let count = end - start;
+                let folded = if let Some(out) = out.as_deref_mut() {
+                    let offset = 2 * (start - pairs.start);
+                    out[offset..offset + 2 * count].as_chunks_mut::<2>().0
+                } else {
+                    &mut lookup_tile[..count]
+                };
+                let weight_start = start & low_mask;
+                let weights = &eq_low[weight_start..weight_start + count];
+                let tile_classes = &classes[2 * G * start..2 * G * end];
+                let first = &tile_classes[..2 * G];
+                if count >= 8
+                    && first == &tile_classes[tile_classes.len() - 2 * G..]
+                    && tile_classes.chunks_exact(2 * G).all(|pair| pair == first)
+                {
+                    let left = fold_entry(2 * start);
+                    let right = fold_entry(2 * start + 1);
+                    if materialize {
+                        folded.fill([left, right]);
+                    }
+                    if !left.is_zero() || !right.is_zero() {
+                        inner.add(left, right - left, weights.iter().copied().sum());
+                    }
+                    continue;
+                }
+                for (pair, [left, right]) in (start..end).zip(folded.iter_mut()) {
+                    *left = fold_entry(2 * pair);
+                    *right = fold_entry(2 * pair + 1);
+                }
+                for (&[left, right], &weight) in folded.iter().zip(weights) {
+                    inner.add(left, right - left, weight);
+                }
+            }
         }
         let e_out = eq_high[high];
         for (total, inner) in totals.iter_mut().zip(inner.reduce()) {
@@ -617,14 +850,28 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
             Vec::new()
         };
         let delta_offset = ((b - 1) * (1 + radix + radix * radix + radix * radix * radix)) as i32;
+        let eq_tile = if b == 8 && quads_per_lane / 2 >= HISTOGRAM_TILE {
+            // Summing over the four low variables uses the existing suffix
+            // equality table. This only applies when the high table is unchanged.
+            split_eq
+                .remaining_eq_tables_after(2 + HISTOGRAM_LOG_TILE)
+                .filter(|&(low, high)| {
+                    low.len() * HISTOGRAM_TILE == eq_low.len() && high.len() == eq_high.len()
+                })
+                .map(|(low, _)| low)
+        } else {
+            None
+        };
         let layout = ScanLayout {
             witness: witness.view(),
+            packed_lanes: witness.bit_width() == 3 && coeff_count == 128 && eq_tile.is_some(),
             lane_weights,
             linear_terms,
             source_blocks: &source_blocks,
             source_block_count,
             eq_low,
             eq_high,
+            eq_tile,
             tau2: stage1_point[2],
             b,
             coeff_count,
@@ -661,24 +908,35 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
             return Ok(None);
         };
 
-        let tau2 = stage1_point[2];
-        let mixed_histogram = if quads_per_lane >= 2 {
-            totals
-                .even_histogram
-                .iter()
-                .zip(&totals.odd_histogram)
-                .map(|(&even, &odd)| even + tau2 * (odd - even))
-                .collect()
+        let norm_cache = if matches!(basis, PrefixBasis::B16) {
+            Stage2PrefixCache::from_basis16_marginals(
+                &totals.even_histogram,
+                stage1_point[0],
+                stage1_point[1],
+                batching_coeff,
+            )
         } else {
-            totals.even_histogram.clone()
+            let tau2 = stage1_point[2];
+            let mixed_histogram;
+            let histogram = if quads_per_lane >= 2 {
+                mixed_histogram = totals
+                    .even_histogram
+                    .iter()
+                    .zip(&totals.odd_histogram)
+                    .map(|(&even, &odd)| even + tau2 * (odd - even))
+                    .collect::<Vec<_>>();
+                &mixed_histogram
+            } else {
+                &totals.even_histogram
+            };
+            Stage2PrefixCache::from_norm_histogram(
+                histogram,
+                basis,
+                stage1_point[0],
+                stage1_point[1],
+                batching_coeff,
+            )?
         };
-        let norm_cache = Stage2PrefixCache::from_norm_histogram(
-            &mixed_histogram,
-            basis,
-            stage1_point[0],
-            stage1_point[1],
-            batching_coeff,
-        )?;
         let (even_histogram, odd_histogram) = if serves_round2 {
             (totals.even_histogram, totals.odd_histogram)
         } else {
@@ -865,28 +1123,50 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
         split_eq: &GruenSplitEq<E>,
         out: Option<&mut [E]>,
     ) -> [E; 3] {
-        let class_count = self.quad_fold.len();
+        let class_count = 1 << (4 * self.digit_bits);
         let group_weights = EqPolynomial::evals(&self.challenges[2..])
             .expect("compact prefix challenge count is bounded");
         debug_assert_eq!(group_weights.len(), G);
-        let lookups = group_weights
-            .iter()
-            .flat_map(|&weight| self.quad_fold.iter().map(move |&fold| weight * fold))
-            .collect::<Vec<_>>();
+        let mut scaled;
+        let lookups = if self.b == 16 {
+            scaled = Vec::with_capacity(G * class_count);
+            let weights = self.quad_weights();
+            for &weight in &group_weights {
+                append_basis16_table(&mut scaled, weights.map(|digit| weight * digit));
+            }
+            &scaled
+        } else if G == 1 {
+            &self.quad_fold
+        } else {
+            scaled = group_weights
+                .iter()
+                .flat_map(|&weight| self.quad_fold.iter().map(move |&fold| weight * fold))
+                .collect();
+            &scaled
+        };
         let (eq_low, eq_high) = split_eq.remaining_eq_tables();
         let pair_count = self.classes.len() / (2 * G);
         let task_pairs = pair_count
             .div_ceil(parallel_tasks(TASKS_PER_THREAD))
             .max(MIN_LOOKUP_TASK_PAIRS);
+        let constant_quad_norms =
+            (G == 2 && SKIP_LINEAR && self.b == 8 && eq_low.len() >= 256 && out.is_none())
+                .then(|| ConstantQuadNorms::new([group_weights[0], group_weights[1]]));
         let run = |task: usize, out: Option<&mut [E]>| {
             let start = task * task_pairs;
+            let pairs = start..(start + task_pairs).min(pair_count);
+            if let Some(norms) = &constant_quad_norms {
+                if ConstantQuadNorms::<E>::supports(&self.classes, &pairs) {
+                    return norms.sum(lookups, &self.classes, eq_low, eq_high, pairs);
+                }
+            }
             lookup_pairs::<E, G, SKIP_LINEAR>(
-                &lookups,
+                lookups,
                 class_count,
                 &self.classes,
                 eq_low,
                 eq_high,
-                start..(start + task_pairs).min(pair_count),
+                pairs,
                 out,
             )
         };
@@ -911,7 +1191,12 @@ impl<E: Field + Ring + Unreduced + Fold> CompactQuotientPrefix<E> {
     pub(super) fn bind(&mut self, r: E) {
         self.relation_moments.bind(r);
         self.challenges.push(r);
-        if self.challenges.len() == 2 {
+        if self.challenges.len() == 3 {
+            self.even_histogram = Vec::new();
+            self.odd_histogram = Vec::new();
+            self.delta_histogram = Vec::new();
+        }
+        if self.challenges.len() == 2 && self.b != 16 {
             let half = (self.b / 2) as i64;
             let quad_weights = self.quad_weights();
             let digit_terms: [Vec<E>; 4] = std::array::from_fn(|digit| {
@@ -980,3 +1265,11 @@ impl<E: Field + Ring + Unreduced + Fold> RelationRoundState<E> {
         engine.bind(r);
     }
 }
+
+#[cfg(test)]
+#[path = "basis16_lookup_tests.rs"]
+mod basis16_lookup_tests;
+
+#[cfg(test)]
+#[path = "class_tile_histogram_tests.rs"]
+mod class_tile_histogram_tests;

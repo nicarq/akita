@@ -1,5 +1,6 @@
 //! Dense polynomial storage and constructors.
 
+use super::fixed_fold_ntt::{self, FixedFoldNtt};
 use crate::sources::poly_helpers::SignedDigitBasis;
 use akita_algebra::ring::cyclotomic::BalancedDecomposePow2Params;
 use akita_algebra::CyclotomicRing;
@@ -64,6 +65,7 @@ pub struct DensePoly<F: Field> {
     coeffs: DenseCoefficients<F>,
     nonzero_coeff_len: usize,
     digit_cache: OnceLock<DenseDigitCache>,
+    pub(super) fixed_fold_ntt: Option<Arc<FixedFoldNtt>>,
 }
 
 // Setup-prefix polynomials retain a bounded view of the backend's single setup.
@@ -84,6 +86,7 @@ impl<F: Field + Clone> Clone for DensePoly<F> {
             coeffs: self.coeffs.clone(),
             nonzero_coeff_len: self.nonzero_coeff_len,
             digit_cache: OnceLock::new(),
+            fixed_fold_ntt: self.fixed_fold_ntt.clone(),
         }
     }
 }
@@ -190,6 +193,34 @@ impl<F: Field> DensePoly<F> {
 }
 
 impl<F: Field + CanonicalEncoding> DensePoly<F> {
+    /// Prepare the coefficient spectra for repeated degree-2048 openings with
+    /// four balanced 16-bit digits and challenges embedded at stride 16.
+    ///
+    /// Use for immutable sources whose opening cost amortizes the spectrum
+    /// cache. The ordinary coefficient view remains available for commitments
+    /// and opening at other geometries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a zero position count, unsupported field or
+    /// insufficient memory for the checked cache extent.
+    pub fn with_fixed_fold_ntt_2048(
+        mut self,
+        positions_per_block: usize,
+    ) -> Result<Self, AkitaError> {
+        if let Some(cache) = &self.fixed_fold_ntt {
+            if cache.positions() == positions_per_block {
+                return Ok(self);
+            }
+            return Err(AkitaError::InvalidInput(
+                "fixed fold NTT cache already has a different position count".into(),
+            ));
+        }
+        let rings = self.nonzero_ring_coeffs::<{ fixed_fold_ntt::RING_D }>()?;
+        self.fixed_fold_ntt = Some(Arc::new(FixedFoldNtt::new(rings, positions_per_block)?));
+        Ok(self)
+    }
+
     pub(crate) fn from_setup_prefix(
         setup: Arc<AkitaExpandedSetup<F>>,
         num_vars: usize,
@@ -212,6 +243,7 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             coeffs: DenseCoefficients::SetupPrefix { setup, len },
             nonzero_coeff_len: len,
             digit_cache: OnceLock::new(),
+            fixed_fold_ntt: None,
         })
     }
 
@@ -256,6 +288,7 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             coeffs: DenseCoefficients::Owned(RingVec::from_coeffs(coeffs)),
             nonzero_coeff_len,
             digit_cache: OnceLock::new(),
+            fixed_fold_ntt: None,
         })
     }
 
@@ -288,6 +321,7 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             coeffs: DenseCoefficients::Owned(RingVec::from_coeffs(values)),
             nonzero_coeff_len,
             digit_cache: OnceLock::new(),
+            fixed_fold_ntt: None,
         })
     }
 
@@ -325,6 +359,7 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             coeffs: DenseCoefficients::Owned(RingVec::from_coeffs(flat)),
             nonzero_coeff_len,
             digit_cache: OnceLock::new(),
+            fixed_fold_ntt: None,
         })
     }
 

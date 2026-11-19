@@ -470,3 +470,63 @@ fn scanned_bounds_match_scalar_oracle_for_slices_and_zero_padding() {
         }
     }
 }
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[test]
+fn centered_writer_matches_staged_digits_bounds_and_gaps() {
+    if !std::arch::is_aarch64_feature_detected!("neon") {
+        return;
+    }
+    use crate::opaque::balanced_decompose_centered_i32_i8_into;
+
+    let residues = [
+        i32::MIN,
+        i32::MAX,
+        -4,
+        -8,
+        -1,
+        0,
+        1,
+        3,
+        7,
+        -0x1000_0000,
+        0x1000_0000,
+    ];
+    for width in [3, 4] {
+        for (count, levels) in [(1, 1), (17, 7), (129, 10)] {
+            let rows: Vec<[i32; 64]> = (0..count)
+                .map(|row| std::array::from_fn(|lane| residues[(row + lane) % residues.len()]))
+                .collect();
+            let mut digits = vec![[0; 64]; count * levels];
+            for (row, planes) in rows.iter().zip(digits.chunks_exact_mut(levels)) {
+                balanced_decompose_centered_i32_i8_into(row, planes, u32::from(width));
+            }
+            let start = 128;
+            let end = start + digits.as_flattened().len();
+            let mut staged = PackedSignedDigitWriter::new(end + 12, width).unwrap();
+            let mut fused = PackedSignedDigitWriter::new(end + 12, width).unwrap();
+            for writer in [&mut staged, &mut fused] {
+                writer.write_at(0, &[1, -1, 1]).unwrap();
+            }
+            assert!(!fused
+                .try_write_centered_rows(3, &rows, levels, u32::from(width))
+                .unwrap());
+            assert!(!fused
+                .try_write_centered_rows(start, &rows, levels, u32::from(width - 1))
+                .unwrap());
+            assert_eq!(fused.position(), 3);
+            assert!(fused
+                .try_write_centered_rows(start, &rows, levels, u32::from(width))
+                .unwrap());
+            staged.write_at(start, digits.as_flattened()).unwrap();
+            assert_eq!(fused.position(), end);
+            assert!(fused
+                .try_write_centered_rows(start, &rows, levels, u32::from(width))
+                .is_err());
+            for writer in [&mut staged, &mut fused] {
+                writer.write_at(end + 2, &[1, 2, -1]).unwrap();
+            }
+            assert_eq!(fused.finish().unwrap(), staged.finish().unwrap());
+        }
+    }
+}

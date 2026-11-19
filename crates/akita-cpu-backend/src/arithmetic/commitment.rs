@@ -11,6 +11,7 @@ use crate::opaque::{commit_onehot_sources, OneHotSource};
 use crate::sources::block_digits::{
     DecomposedPackedDigits, DigitShape, I16Rows, I8Rows, LiveRings, PackedDigits,
 };
+use crate::sources::field_runs::RunDigits;
 use crate::sources::packed_digits::PackedSignedDigitView;
 use crate::sources::poly_helpers::SignedDigitBasis;
 use crate::sources::signed_blocks::{Decoded, I16Slice, I8Slice, SignedBlockDigits};
@@ -22,7 +23,33 @@ use akita_params::{balanced_signed_digit_abs_bound, field_modulus, SignedDigitKe
 use akita_types::RingVec;
 use akita_types::{dense_i8_commit_prefers_exact_ifma52, NttCacheKey, NttTransformDomain};
 use jolt_field::{CanonicalEncoding, Field, Unreduced, WithCommitAccumulator};
+use std::collections::BTreeMap;
 use std::ops::Range;
+
+fn dense_commit_blocks(
+    ring_count: usize,
+    nonzero_rings: usize,
+    plan: &CommitInnerPlan,
+) -> Result<(Vec<Range<usize>>, usize), AkitaError> {
+    let block_ranges = (0..ring_count)
+        .step_by(plan.num_positions_per_block)
+        .map(|start| {
+            start.min(nonzero_rings)..(start + plan.num_positions_per_block).min(nonzero_rings)
+        })
+        .collect::<Vec<_>>();
+    if block_ranges.len() != plan.num_live_blocks {
+        return Err(AkitaError::Internal(format!(
+            "dense source produced {} live blocks, expected {}",
+            block_ranges.len(),
+            plan.num_live_blocks
+        )));
+    }
+    let row_width = ring_count
+        .min(plan.num_positions_per_block)
+        .checked_mul(plan.num_digits_inner)
+        .ok_or_else(|| AkitaError::InvalidSetup("dense coefficient row width overflow".into()))?;
+    Ok((block_ranges, row_width))
+}
 
 impl<F: Field, E> CpuBackend<F, E> {
     /// Execute the standard CPU inner stage over request-compiled sources.
@@ -86,20 +113,25 @@ impl<F: Field, E> CpuBackend<F, E> {
             Some(PolynomialType::Dense(DenseType::Coefficients)) => sources
                 .iter()
                 .map(|source| {
-                    let Some(PolynomialRepresentation::Dense(DenseRepresentation::Coefficients(
-                        dense,
-                    ))) = source.representation()
-                    else {
-                        return Err(AkitaError::Internal(
-                            "compiled dense group contains another representation".into(),
-                        ));
+                    let rows = match source.representation() {
+                        Some(PolynomialRepresentation::Dense(
+                            DenseRepresentation::Coefficients(dense),
+                        )) => self.dense_coefficient_commit_rows::<D>(
+                            prepared,
+                            *dense,
+                            source.descriptor(),
+                            plan,
+                        )?,
+                        Some(PolynomialRepresentation::Dense(DenseRepresentation::FieldRuns(
+                            runs,
+                        ))) => self.field_run_commit_rows::<D>(prepared, runs, plan)?,
+                        _ => {
+                            return Err(AkitaError::Internal(
+                                "compiled dense group contains another representation".into(),
+                            ))
+                        }
                     };
-                    crate::typed_inner_rows(self.dense_coefficient_commit_rows::<D>(
-                        prepared,
-                        *dense,
-                        source.descriptor(),
-                        plan,
-                    )?)
+                    crate::typed_inner_rows(rows)
                 })
                 .collect(),
             Some(PolynomialType::Dense(DenseType::SignedBlocks)) => sources
@@ -194,29 +226,11 @@ impl<F: Field, E> CpuBackend<F, E> {
                 nonzero_rings,
             )
         };
-        let block_ranges = (0..ring_count)
-            .step_by(plan.num_positions_per_block)
-            .map(|start| {
-                start.min(nonzero_rings)..(start + plan.num_positions_per_block).min(nonzero_rings)
-            })
-            .collect::<Vec<_>>();
-        if block_ranges.len() != plan.num_live_blocks {
-            return Err(AkitaError::Internal(format!(
-                "dense source produced {} live blocks, expected {}",
-                block_ranges.len(),
-                plan.num_live_blocks
-            )));
-        }
         let shape = DigitShape {
             num_digits: plan.num_digits_inner,
             log_basis: plan.log_basis_inner,
         };
-        let row_width = ring_count
-            .min(plan.num_positions_per_block)
-            .checked_mul(shape.num_digits)
-            .ok_or_else(|| {
-                AkitaError::InvalidSetup("dense coefficient row width overflow".into())
-            })?;
+        let (block_ranges, row_width) = dense_commit_blocks(ring_count, nonzero_rings, &plan)?;
         let signed_digit_kernel =
             signed_digit_kernel_for_setup(shape.log_basis, "for dense commitment")?;
         let params = BalancedDecomposePow2Params::new(shape.num_digits, shape.log_basis);
@@ -236,6 +250,70 @@ impl<F: Field, E> CpuBackend<F, E> {
             false,
             I8CommitPolicy::Dense,
         )
+    }
+
+    fn field_run_commit_rows<const D: usize>(
+        &self,
+        prepared: &CpuPreparedSetup<F>,
+        poly: &crate::FieldRunPoly<F>,
+        plan: CommitInnerPlan,
+    ) -> Result<Vec<Vec<CyclotomicRing<F, D>>>, AkitaError>
+    where
+        F: Field + CanonicalEncoding,
+    {
+        let ring_count = poly.logical_len().div_ceil(D);
+        let live_rings = poly.live_len().div_ceil(D);
+        let (block_ranges, row_width) = dense_commit_blocks(ring_count, live_rings, &plan)?;
+        let shape = DigitShape {
+            num_digits: plan.num_digits_inner,
+            log_basis: plan.log_basis_inner,
+        };
+        let kernel = signed_digit_kernel_for_setup(shape.log_basis, "for dense commitment")?;
+        let source = RunDigits::<F, D>::new(poly, shape)?;
+
+        let mut distinct = Vec::new();
+        let mut constants = BTreeMap::new();
+        let mut block_indices = Vec::with_capacity(block_ranges.len());
+        for (index, rings) in block_ranges.into_iter().enumerate() {
+            let constant = poly
+                .constant_value(rings.start * D..rings.end * D)
+                .and_then(|value| value.to_u128_checked());
+            let representative = match constant {
+                Some(value) => *constants.entry((value, rings.len())).or_insert(index),
+                None => index,
+            };
+            block_indices.push(representative);
+            if representative == index {
+                distinct.push(rings);
+            }
+        }
+        let rows = self.commit_rows(
+            prepared,
+            plan.n_a,
+            row_width,
+            &source,
+            &distinct,
+            shape,
+            kernel,
+            false,
+            I8CommitPolicy::Dense,
+        )?;
+        if rows.len() == block_indices.len() {
+            return Ok(rows);
+        }
+        let mut rows = rows.into_iter();
+        let mut output: Vec<Vec<CyclotomicRing<F, D>>> = Vec::with_capacity(block_indices.len());
+        for (index, representative) in block_indices.into_iter().enumerate() {
+            let row = if representative == index {
+                rows.next().ok_or_else(|| {
+                    AkitaError::Internal("missing field run commitment row".into())
+                })?
+            } else {
+                output[representative].clone()
+            };
+            output.push(row);
+        }
+        Ok(output)
     }
 
     pub(crate) fn signed_block_commit_rows<const D: usize>(

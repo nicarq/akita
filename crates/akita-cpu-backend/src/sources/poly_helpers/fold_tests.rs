@@ -448,6 +448,61 @@ fn large_basis_partitioned_fold_preserves_i16_digits() {
 }
 
 #[test]
+fn repeated_dense_blocks_fold_like_each_individual_ring() {
+    type F = Prime128Offset275;
+    const D: usize = 64;
+    const POSITIONS: usize = 9;
+    let log_basis = 13;
+    let num_digits = compute_num_digits_field_width(128, log_basis);
+    let params = BalancedDecomposePow2Params::new(num_digits, log_basis);
+    let challenges = [
+        SparseChallenge {
+            positions: vec![0, 19, 63].into(),
+            coeffs: vec![1, -1, 1].into(),
+        },
+        SparseChallenge {
+            positions: vec![5, 13, 17].into(),
+            coeffs: vec![-1, 2, 1].into(),
+        },
+    ];
+    let ring = |block: usize| {
+        CyclotomicRing::<F, D>::from_coefficients(std::array::from_fn(|index| {
+            let value = F::from_u128_reduced((index as u128 + 1) * 8193 + block as u128);
+            if index.is_multiple_of(3) {
+                -value
+            } else {
+                value
+            }
+        }))
+    };
+    let mut rings: Vec<_> = (0..2 * POSITIONS).map(|i| ring(i / POSITIONS)).collect();
+    let check = |rings: &[CyclotomicRing<F, D>]| {
+        let actual =
+            balanced_ring_decompose_fold_partitioned(rings, &challenges, POSITIONS, &params)
+                .unwrap();
+        let mut expected = vec![[0i32; D]; POSITIONS * num_digits];
+        let mut digits = vec![[0i16; D]; num_digits];
+        for (block, challenge) in rings.chunks(POSITIONS).zip(&challenges) {
+            for (position, ring) in block.iter().enumerate() {
+                ring.balanced_decompose_pow2_i16_into(&mut digits, &params);
+                for (digit, plane) in digits.iter().enumerate() {
+                    sparse_mul_acc_i16_scalar(
+                        plane,
+                        challenge,
+                        &mut expected[position * num_digits + digit],
+                    );
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    };
+    check(&rings);
+    check(&rings[..rings.len() - 1]);
+    rings[2 * POSITIONS - 2] = ring(2);
+    check(&rings);
+}
+
+#[test]
 fn large_basis_d64_chunks_ring_and_falls_back_for_oversized_term() {
     type F = Prime128Offset275;
     const D: usize = 64;

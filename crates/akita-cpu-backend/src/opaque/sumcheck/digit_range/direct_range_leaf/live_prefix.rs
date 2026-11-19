@@ -60,6 +60,15 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
         live_pairs: usize,
         entries_for_tile: impl Fn(Range<usize>) -> W + Sync,
     ) -> TaylorSums<E> {
+        self.compute_round_live_prefix_filtered(live_pairs, |_| true, entries_for_tile)
+    }
+
+    pub(super) fn compute_round_live_prefix_filtered<W: FnMut(usize, E, &mut TaylorSums<E>)>(
+        &self,
+        live_pairs: usize,
+        include: impl Fn(Range<usize>) -> bool + Sync,
+        entries_for_tile: impl Fn(Range<usize>) -> W + Sync,
+    ) -> TaylorSums<E> {
         debug_assert!(self.rounds_completed < self.num_vars);
         let (e_first, e_second) = self.split_eq.remaining_eq_tables();
         let block_size = e_first.len().min(live_pairs);
@@ -67,15 +76,17 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
         let num_coeffs_q = self.range_poly.num_coefficients();
         let tile_accumulators: Vec<_> = cfg_into_iter!(0..live_pairs.div_ceil(tile_pairs))
             .map(|tile| {
-                let tile_start = tile * tile_pairs;
-                let tile_end = (tile_start + tile_pairs).min(live_pairs);
+                let tile = tile * tile_pairs..((tile + 1) * tile_pairs).min(live_pairs);
+                if !include(tile.clone()) {
+                    return [E::Product::zero(); MAX_DIRECT_RANGE_COEFFICIENTS];
+                }
                 accumulate_live_prefix_tile(
                     num_coeffs_q,
                     e_first,
                     e_second,
                     block_size,
-                    tile_start..tile_end,
-                    entries_for_tile(tile_start..tile_end),
+                    tile.clone(),
+                    entries_for_tile(tile),
                 )
             })
             .collect();

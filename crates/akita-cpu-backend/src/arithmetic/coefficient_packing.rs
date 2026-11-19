@@ -1,12 +1,14 @@
 //! Shared checked construction for coefficient-packing backend kernels.
 
+use super::coefficient_packing_signed::PackedCoefficientSource;
 use crate::opaque::SubringCoefficientPackingPlan;
 use akita_error::{checked, AkitaError};
 use akita_types::FpExtEncoding;
 use jolt_field::solinas::parallel::*;
-use jolt_field::{AdditiveGroup, ExtField, Field, MulBaseUnreduced, Unreduced};
+use jolt_field::{AdditiveGroup, CanonicalEncoding, ExtField, Field, MulBaseUnreduced, Unreduced};
+use std::ops::Range;
 
-fn zero_vec<T: AdditiveGroup>(len: usize) -> Result<Vec<T>, AkitaError> {
+pub(super) fn zero_vec<T: AdditiveGroup>(len: usize) -> Result<Vec<T>, AkitaError> {
     let mut values = Vec::new();
     values.try_reserve_exact(len).map_err(|_| {
         AkitaError::InvalidInput(format!(
@@ -78,11 +80,13 @@ pub(crate) fn coefficient_packing_partials_from_position_source<F, E, P, const D
     fused_weights: &FusedPackingWeights<'_, E>,
     source_num_vars: usize,
     nonzero_positions: usize,
+    signed_source: Option<PackedCoefficientSource<'_>>,
+    constant_block: impl Fn(Range<usize>) -> Option<F> + Sync,
     position_at: impl Fn(usize) -> Result<P, AkitaError> + Sync,
     coefficient: impl Fn(usize, usize, &P) -> F + Sync,
 ) -> Result<Vec<F>, AkitaError>
 where
-    F: Field,
+    F: Field + CanonicalEncoding,
     E: ExtField<F> + FpExtEncoding<F> + MulBaseUnreduced<F>,
     P: Sync,
 {
@@ -110,6 +114,9 @@ where
     })?;
     let s = geometry.challenge_subring_dimension();
     let stride = geometry.subring_embedding_stride();
+    let position_weights = fused_weights.tables().position_weights();
+    let packing_weights = fused_weights.tables().packing_weights();
+    let weight_sums = std::sync::OnceLock::new();
     let fused_weights = fused_weights.values();
 
     let block_coordinates = cfg_into_iter!(0..num_blocks)
@@ -129,7 +136,26 @@ where
                 })?
                 .min(point.num_positions_per_block())
                 .min(nonzero_positions.saturating_sub(first_position));
-            let packed = if E::SUM_IS_EXACT {
+            let packed = if let Some(value) =
+                constant_block(first_position..first_position + live_in_block)
+            {
+                let (all_positions, all_packing) = weight_sums.get_or_init(|| {
+                    (
+                        position_weights.iter().copied().sum::<E>(),
+                        packing_weights.iter().copied().sum::<E>(),
+                    )
+                });
+                let position_sum = if live_in_block == position_weights.len() {
+                    *all_positions
+                } else {
+                    position_weights[..live_in_block].iter().copied().sum::<E>()
+                };
+                vec![(position_sum * *all_packing).mul_base(value); s]
+            } else if let Some(packed) = signed_source.map_or(Ok(None), |source| {
+                source.contract::<F, E, D>(first_position, live_in_block, stride, fused_weights)
+            })? {
+                packed
+            } else if E::SUM_IS_EXACT {
                 let mut products = zero_vec::<<E as Unreduced>::Product>(s)?;
                 // Small strides expose more independent subring accumulators
                 // than products per accumulator. At larger strides, preserve
@@ -282,7 +308,7 @@ mod tests {
     };
     use jolt_field::{
         CanonicalEncoding, Ext2, ExtField, Field, FpExt4, One, Prime128Offset6A23801F,
-        Prime32Offset99, Prime64Offset59, Ring,
+        Prime32Offset99, Prime64Offset59, Ring, Zero,
     };
 
     type F = Prime32Offset99;
@@ -356,6 +382,62 @@ mod tests {
                 assert_eq!(got[0].coordinates(), expected);
             }
         }
+    }
+
+    #[test]
+    fn compact_full_field_runs_match_flat_packing_reference() {
+        type Base = Prime64Offset59;
+        type Extension = Ext2<Base>;
+        const RING_D: usize = 512;
+        const POSITIONS: usize = 32;
+        const NUM_VARS: usize = 14;
+        let geometry = SubringCoefficientPackingGeometry::try_new(2, RING_D, 128).unwrap();
+        let point = (0..NUM_VARS)
+            .map(|i| Extension::from_u64(i as u64 + 3))
+            .collect::<Vec<_>>();
+        let prepared = PreparedSubringCoefficientPackingPoint::new(
+            geometry,
+            BasisMode::Lagrange,
+            POSITIONS,
+            4,
+            NUM_VARS,
+            &point,
+        )
+        .unwrap();
+        let tables = SubringCoefficientPackingTables::new(prepared).unwrap();
+        let runs = vec![
+            (4 * RING_D, Base::from_u64(u64::MAX - 65)),
+            (5 * RING_D + 11, Base::from_u64((1 << 63) + 7)),
+            (7 * RING_D, Base::zero()),
+            (4 * RING_D, Base::from_u64((1 << 60) + 13)),
+        ];
+        let mut flat = runs
+            .iter()
+            .flat_map(|&(len, value)| std::iter::repeat_n(value, len))
+            .collect::<Vec<_>>();
+        flat.resize(POSITIONS * RING_D, Base::zero());
+        let expected = coefficient_packing_partials::<Base, Extension>(
+            geometry,
+            POSITIONS,
+            4,
+            &flat,
+            tables.position_weights(),
+            tables.packing_weights(),
+        )
+        .unwrap();
+        let poly = crate::FieldRunPoly::new(NUM_VARS, runs).unwrap();
+        let polys = [&poly];
+        let batch =
+            <crate::FieldRunPoly<Base> as RootOpeningSource<Base, RING_D>>::opening_batch(&polys)
+                .unwrap();
+        let got = CpuBackend::<Base, Extension>::for_arithmetic_tests()
+            .coefficient_packing_partials_batch(
+                None,
+                batch,
+                SubringCoefficientPackingPlan { tables: &tables },
+            )
+            .unwrap();
+        assert_eq!(got[0].coordinates(), expected);
     }
 
     #[test]
@@ -783,6 +865,72 @@ mod tests {
             .coefficient_packing_partials_batch(None, recursive_batch, plan)
             .unwrap();
         assert_eq!(dense_partials, recursive_partials);
+    }
+
+    #[test]
+    fn signed_packed_contraction_preserves_field_partials() {
+        type Base = Prime64Offset59;
+        type Extension = Ext2<Base>;
+        const RING_D: usize = 512;
+        const POSITIONS: usize = 35;
+        const NUM_VARS: usize = 15;
+        let source_len = POSITIONS * RING_D - 19;
+        let digits = (0..source_len)
+            .map(|index| {
+                if (index / RING_D).is_multiple_of(4) {
+                    0
+                } else {
+                    (index.wrapping_mul(21) as i8).wrapping_sub(83)
+                }
+            })
+            .collect::<Vec<_>>();
+        let witness = RecursiveWitnessFlat::from_i8_digits(digits.clone())
+            .align_for_commitment_ring_dim(RING_D)
+            .unwrap();
+        let mut source = digits.into_iter().map(Base::from_i8).collect::<Vec<_>>();
+        source.resize(POSITIONS * RING_D, Base::zero());
+        let point = (0..NUM_VARS)
+            .map(|i| {
+                Extension::new(
+                    Base::from_u64(0x8765_4567_319a_21ef_u64.wrapping_shl(i as u32)),
+                    Base::from_u64(0x7654_0b32_8943_72a0_u64.rotate_right(i as u32)),
+                )
+            })
+            .collect::<Vec<_>>();
+        for subring in [128, 256] {
+            let geometry = SubringCoefficientPackingGeometry::try_new(2, RING_D, subring).unwrap();
+            let tables = PreparedSubringCoefficientPackingPoint::new(
+                geometry,
+                BasisMode::Lagrange,
+                POSITIONS,
+                16,
+                NUM_VARS,
+                &point,
+            )
+            .and_then(SubringCoefficientPackingTables::new)
+            .unwrap();
+            let expected = coefficient_packing_partials::<Base, Extension>(
+                geometry,
+                POSITIONS,
+                16,
+                &source,
+                tables.position_weights(),
+                tables.packing_weights(),
+            )
+            .unwrap();
+            let refs = [&witness];
+            let batch =
+                <RecursiveWitnessFlat as RootOpeningSource<Base, RING_D>>::opening_batch(&refs)
+                    .unwrap();
+            let received = CpuBackend::<Base, Extension>::for_arithmetic_tests()
+                .coefficient_packing_partials_batch(
+                    None,
+                    batch,
+                    SubringCoefficientPackingPlan { tables: &tables },
+                )
+                .unwrap();
+            assert_eq!(received[0].coordinates(), expected);
+        }
     }
 
     #[test]

@@ -91,6 +91,15 @@ fn validate_materialized_representation<F: Field>(
                 });
             }
         }
+        PolynomialRepresentation::Dense(DenseRepresentation::FieldRuns(runs)) => {
+            if runs.num_vars() != descriptor.num_vars()
+                || runs.live_len() > descriptor.total_coefficient_len()
+            {
+                return Err(AkitaError::InvalidInput(
+                    "field runs disagree with their source descriptor".into(),
+                ));
+            }
+        }
         PolynomialRepresentation::Dense(DenseRepresentation::SignedBlocks(blocks)) => {
             if blocks.num_vars() != descriptor.num_vars()
                 || blocks.len() > descriptor.total_coefficient_len()

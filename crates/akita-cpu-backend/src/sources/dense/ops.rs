@@ -3,6 +3,7 @@
 //! Storage is D-free; every ring-shaped operation takes the ring dimension as
 //! a method const generic and views the flat coefficients at kernel entry.
 
+use super::fixed_fold_ntt;
 use super::poly::DensePoly;
 use crate::opaque::DecomposeFoldWitness;
 use crate::sources::block_digits::{CachedDigits, DigitShape, LiveRings};
@@ -40,6 +41,18 @@ where
         log_basis: u32,
     ) -> Result<Vec<DecomposeFoldWitness>, AkitaError> {
         validate_digit_shape(num_digits, log_basis)?;
+        if let Some(cache) = self.fixed_fold_ntt.as_ref().filter(|cache| {
+            cache.positions() == num_positions_per_block
+                && num_digits == fixed_fold_ntt::DIGITS
+                && log_basis == fixed_fold_ntt::LOG_BASIS
+        }) {
+            if let Some(rows) = cache.fold::<D>(challenges, chunk_ranges)? {
+                return Ok(rows
+                    .into_iter()
+                    .map(DecomposeFoldWitness::from_centered_rows)
+                    .collect());
+            }
+        }
         let coeffs = self.nonzero_ring_coeffs::<D>()?;
         let shape = DigitShape {
             num_digits,

@@ -7,6 +7,7 @@ use akita_types::{NttCacheKey, NttTransformDomain};
 #[allow(unused_imports)]
 use jolt_field::solinas::parallel::*;
 use jolt_field::{CanonicalEncoding, Field};
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 #[tracing::instrument(skip_all, name = "dense_commit_rows_exact_i16")]
@@ -35,7 +36,25 @@ where
             },
         )?,
         |ntt| {
-            let fill = |scratch: &mut Option<S::I16Scratch>, rings: &Range<usize>| {
+            let uniform_values = cfg_iter!(block_ranges)
+                .map(|rings| source.uniform_block_value(rings.clone()))
+                .collect::<Vec<_>>();
+            let mut uniform_blocks = BTreeMap::new();
+            let representatives = uniform_values
+                .into_iter()
+                .zip(block_ranges)
+                .enumerate()
+                .map(|(index, (value, rings))| {
+                    value.map_or(index, |value| {
+                        *uniform_blocks.entry((value, rings.len())).or_insert(index)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let fill = |scratch: &mut Option<S::I16Scratch>,
+                        (index, rings): (usize, &Range<usize>)| {
+                if representatives[index] != index {
+                    return Ok(Vec::new());
+                }
                 if rings.is_empty() {
                     return Ok(vec![CyclotomicRing::zero(); n_a]);
                 }
@@ -45,17 +64,26 @@ where
                 ntt.mat_vec_i16::<F>(shape.log_basis, n_a, rhs)
             };
             #[cfg(feature = "parallel")]
-            {
-                cfg_iter!(block_ranges).map_init(|| None, fill).collect()
-            }
+            let result = cfg_iter!(block_ranges)
+                .enumerate()
+                .map_init(|| None, fill)
+                .collect::<Result<Vec<_>, _>>();
             #[cfg(not(feature = "parallel"))]
-            {
+            let result = {
                 let mut rhs = None;
                 block_ranges
                     .iter()
-                    .map(|rings| fill(&mut rhs, rings))
-                    .collect()
+                    .enumerate()
+                    .map(|block| fill(&mut rhs, block))
+                    .collect::<Result<Vec<_>, _>>()
+            };
+            let mut rows = result?;
+            for (index, representative) in representatives.into_iter().enumerate() {
+                if index != representative {
+                    rows[index] = rows[representative].clone();
+                }
             }
+            Ok(rows)
         },
     )
 }

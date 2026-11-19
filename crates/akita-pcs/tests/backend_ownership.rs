@@ -2,6 +2,8 @@
 #![allow(missing_docs)]
 
 use crate::common;
+#[path = "backend_ownership/field_run_poly.rs"]
+mod field_run_poly;
 #[path = "backend_ownership/signed_block_poly.rs"]
 mod signed_block_poly;
 

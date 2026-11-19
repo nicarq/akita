@@ -130,6 +130,7 @@ struct PrefixWeights<E: Field> {
     octet_class_weights: Vec<E>,
     /// Round-3 weight `eq(tau0[4..], pair)` summed into the even and odd classes.
     octet_pair_class_weights: Vec<[E; 2]>,
+    compact_pairs: Option<Box<octet_prefix::JointOctetWeights<E>>>,
 }
 
 /// Each prefix round owns precisely the challenges and tables it needs.
@@ -153,6 +154,7 @@ enum DirectRangePrefixState<E: Field> {
         /// Taylor terms of each octet class after round 2.
         octet_terms: Vec<OctetClassTerms<E>>,
         octet_pair_class_weights: Vec<[E; 2]>,
+        compact_pairs: Option<Box<octet_prefix::JointOctetWeights<E>>>,
     },
 }
 

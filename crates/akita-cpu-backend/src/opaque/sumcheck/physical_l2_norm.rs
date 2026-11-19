@@ -180,7 +180,9 @@ pub(super) struct FusedRangeNormProver<E: Field> {
     pub(super) rounds_completed: usize,
 }
 
-impl<E: Field + Ring + Fold + Unreduced> SumcheckInstanceProver<E> for FusedRangeNormProver<E> {
+impl<E: Field + Ring + Fold + Unreduced + 'static> SumcheckInstanceProver<E>
+    for FusedRangeNormProver<E>
+{
     fn num_rounds(&self) -> usize {
         EqFactoredSumcheckInstanceProver::num_rounds(&self.range)
     }

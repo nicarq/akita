@@ -4,7 +4,8 @@ use crate::kernels::linear::{
     centered_quotient_rows_with_i16_tail, centered_rows_abs_bound, digit_relation_matrix_extent,
     digit_relation_rows_cached_prover_bounds, digit_relation_rows_streamed_prover_bounds,
     fused_quotient_matrix_extent, fused_split_eq_quotients_prover_bounds,
-    fused_split_eq_quotients_streamed_prover_bounds, DigitRelationRows, FusedQuotientRows,
+    fused_split_eq_quotients_streamed_prover_bounds, small_field_matrix_a_quotients_with_tail,
+    DigitRelationRows, FusedQuotientRows,
 };
 use crate::opaque::plans::RingSwitchRelationRows;
 use crate::opaque::RingSwitchRelationKernel;
@@ -13,6 +14,8 @@ use crate::opaque::RingSwitchRelationView;
 use akita_error::AkitaError;
 use akita_types::{centered_quotient_requires_i16_tail_for_field, NttCacheKey, NttTransformDomain};
 use jolt_field::{CanonicalEncoding, Field};
+
+mod periodic_a;
 
 fn validate_role_shape(role: &str, rows: usize, width: usize) -> Result<(), AkitaError> {
     if rows != 0 && width == 0 {
@@ -124,6 +127,42 @@ pub(crate) fn relation_b_a_rows<F: Field + CanonicalEncoding, E, const D: usize>
             b_cyclic: Vec::new(),
             a_quotients: Vec::new(),
         });
+    }
+    if plan.n_b == 0 && plan.n_a != 0 {
+        if let Some(period) = periodic_a::checked_row_period(z) {
+            let view = prepared
+                .expanded
+                .shared_matrix()
+                .ring_view::<D>(1, extent)?;
+            let grouped =
+                periodic_a::fold_matrix_columns(view.as_slice(), plan.n_a, z.len(), period);
+            let rhs = &z[..period];
+            let magnitude = centered_rows_abs_bound(rhs, period).max(u64::from(z_inf_norm));
+            if centered_quotient_requires_i16_tail_for_field::<F, D>(magnitude)? {
+                if let Some(a_quotients) = small_field_matrix_a_quotients_with_tail(
+                    &grouped,
+                    plan.n_a,
+                    rhs,
+                    z_inf_norm,
+                    plan.log_basis_outer,
+                )? {
+                    return Ok(FusedQuotientRows {
+                        b_cyclic: Vec::new(),
+                        a_quotients,
+                    });
+                }
+            } else {
+                return fused_split_eq_quotients_streamed_prover_bounds(
+                    &grouped,
+                    0,
+                    plan.n_a,
+                    &[],
+                    rhs,
+                    z_inf_norm,
+                    plan.log_basis_outer,
+                );
+            }
+        }
     }
     if backend.ntt_operation_uses_cache(NttOperationCluster::RingSwitch, extent) {
         return cached_b_a_rows(prepared, t_hat, z, z_inf_norm, plan);

@@ -2,6 +2,7 @@
 
 pub(crate) mod block_digits;
 pub(crate) mod dense;
+pub(crate) mod field_runs;
 pub(crate) mod flat_blocks;
 pub(crate) mod onehot;
 pub(crate) mod packed_digits;
@@ -13,5 +14,6 @@ pub(crate) mod signed_blocks;
 pub(crate) mod sparse_ring;
 
 pub use dense::DensePoly;
+pub use field_runs::FieldRunPoly;
 pub(crate) use onehot::commit_onehot_sources;
 pub use onehot::{OneHotIndex, OneHotPoly, OneHotSource};

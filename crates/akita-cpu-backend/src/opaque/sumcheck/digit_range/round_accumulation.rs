@@ -1,7 +1,8 @@
 use super::exact_prefix::SplitEqualitySuffixMass;
 use jolt_field::solinas::parallel::*;
 use jolt_field::Unreduced;
-use jolt_field::{Field, Zero};
+use jolt_field::{CanonicalEncoding, Ext2, ExtField, Field, Prime64Offset59, Zero};
+use std::any::{Any, TypeId};
 
 /// Sum `N` products over the explicit pairs of a split-equality round.
 ///
@@ -132,7 +133,7 @@ const MIN_BLOCK_ENTRIES_PER_CLASS: usize = 8;
 /// blocks are long relative to `class_count` the per-entry work is additions
 /// only: a block's inner weights are binned by class and the bins are scaled by
 /// the block's outer weight.
-pub(super) fn accumulate_equality_weighted_class_values<E: Field, const N: usize>(
+pub(super) fn accumulate_equality_weighted_class_values<E: Field + 'static, const N: usize>(
     first: &[E],
     second: &[E],
     explicit_count: usize,
@@ -146,18 +147,37 @@ pub(super) fn accumulate_equality_weighted_class_values<E: Field, const N: usize
     let task_count = super::super::parallel_tasks(2).min(block_count).max(1);
     let blocks_per_task = block_count.div_ceil(task_count).max(1);
     let bin_blocks = first.len() >= class_count * MIN_BLOCK_ENTRIES_PER_CLASS;
+    let wide_bins = bin_blocks
+        && class_count <= 64
+        && TypeId::of::<E>() == TypeId::of::<Ext2<Prime64Offset59>>();
     let class_weights = cfg_fold_reduce!(
         0..task_count,
         || vec![E::zero(); class_count],
         |mut weights: Vec<E>, task_index| {
             let blocks =
                 task_index * blocks_per_task..block_count.min((task_index + 1) * blocks_per_task);
-            let mut block_weights = vec![E::zero(); if bin_blocks { class_count } else { 0 }];
+            let mut block_weights = vec![
+                E::zero();
+                if bin_blocks && !wide_bins {
+                    class_count
+                } else {
+                    0
+                }
+            ];
+            let mut wide_weights = vec![[0u128; 2]; if wide_bins { class_count } else { 0 }];
             for second_index in blocks {
                 let block_start = second_index * first.len();
                 let block_end = explicit_count.min(block_start + first.len());
                 let second_weight = second[second_index];
-                if bin_blocks {
+                if wide_bins {
+                    accumulate_p64_class_block(
+                        &first[..block_end - block_start],
+                        second_weight,
+                        &mut weights,
+                        &mut wide_weights,
+                        |index| class_at(block_start + index),
+                    );
+                } else if bin_blocks {
                     block_weights.fill(E::zero());
                     for index in block_start..block_end {
                         block_weights[class_at(index)] += first[index - block_start];
@@ -195,13 +215,48 @@ pub(super) fn accumulate_equality_weighted_class_values<E: Field, const N: usize
     values
 }
 
+fn accumulate_p64_class_block<E: Field + 'static>(
+    first: &[E],
+    second: E,
+    weights: &mut [E],
+    wide_weights: &mut [[u128; 2]],
+    class_at: impl Fn(usize) -> usize,
+) {
+    type Base = Prime64Offset59;
+    type WideField = Ext2<Base>;
+    wide_weights.fill([0, 0]);
+    for (index, value) in first.iter().enumerate() {
+        let value = (value as &dyn Any)
+            .downcast_ref::<WideField>()
+            .expect("caller selected the P64 quadratic extension");
+        let sum = &mut wide_weights[class_at(index)];
+        for (coordinate, slot) in sum.iter_mut().enumerate() {
+            *slot += value
+                .base_coefficient(coordinate)
+                .to_u128_checked()
+                .unwrap();
+        }
+    }
+    for (weight, &[re, im]) in weights.iter_mut().zip(wide_weights.iter()) {
+        let reduced = WideField::new(Base::solinas_reduce(re), Base::solinas_reduce(im));
+        let reduced = *(&reduced as &dyn Any)
+            .downcast_ref::<E>()
+            .expect("caller selected the P64 quadratic extension");
+        *weight += second * reduced;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn p64_wide_bins_match_direct_exact_reduction() {
+        check_blocked_accumulation_with_inner_len::<Ext2<Prime64Offset59>>(1024);
+    }
     use super::super::MAX_TREE_STAGE_Q_DEGREE;
     use super::*;
     use jolt_field::{FpExt4, Prime128Offset275, Prime32Offset99, Ring};
 
-    fn check_blocked_accumulation<E: Field + Ring + Unreduced>() {
+    fn check_blocked_accumulation<E: Field + Ring + Unreduced + 'static>() {
         // Inner tables below, at and above the block-binning threshold for
         // four classes.
         for first_len in [4, 16, 32, 64] {
@@ -209,7 +264,9 @@ mod tests {
         }
     }
 
-    fn check_blocked_accumulation_with_inner_len<E: Field + Ring + Unreduced>(first_len: usize) {
+    fn check_blocked_accumulation_with_inner_len<E: Field + Ring + Unreduced + 'static>(
+        first_len: usize,
+    ) {
         // A zero weight and a cancelling pair sit among generic weights.
         let mut first = (0..first_len)
             .map(|index| E::from_u64((index * index + 3 * index + 2) as u64))

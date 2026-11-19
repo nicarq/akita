@@ -3,6 +3,7 @@
 //! [`DensePoly`] stores dense coefficients and exposes opening/tensor views.
 //! Commitment representations are selected through `CommitmentSource`.
 
+mod fixed_fold_ntt;
 mod kernels;
 mod ops;
 mod poly;

@@ -219,18 +219,29 @@ pub(crate) fn seam_packing_partials<F, E, S, const D: usize>(
     fused_weights: &FusedPackingWeights<'_, E>,
 ) -> Result<Vec<F>, AkitaError>
 where
-    F: Field,
+    F: Field + CanonicalEncoding,
     E: ExtField<F> + akita_types::FpExtEncoding<F> + MulBaseUnreduced<F>,
     S: RingValueSource<F, D>,
 {
     let full_len = checked::product([source.num_rings(), D]).ok_or_else(|| {
         AkitaError::InvalidInput("coefficient-packing source extent overflow".into())
     })?;
+    let signed_source = source
+        .packed_digits()
+        .filter(|view| live_coeff_len <= full_len && full_len <= view.len())
+        .map(
+            |digits| crate::arithmetic::coefficient_packing_signed::PackedCoefficientSource {
+                digits,
+                live_coeff_len,
+            },
+        );
     if live_coeff_len == full_len {
         coefficient_packing_partials_from_position_source::<F, E, _, D>(
             fused_weights,
             source_num_vars,
             live_coeff_len.div_ceil(D),
+            signed_source,
+            |_| None,
             |position| source.values(position),
             |_, coefficient, values| values.coeff(coefficient),
         )
@@ -239,6 +250,8 @@ where
             fused_weights,
             source_num_vars,
             live_coeff_len.div_ceil(D),
+            signed_source,
+            |_| None,
             |position| source.values(position),
             |position, coefficient, values| {
                 let flat_index = position * D + coefficient;

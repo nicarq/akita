@@ -1,6 +1,6 @@
 //! Class-indexed range-polynomial leaf prover.
 
-use super::class_indexed_state::ClassIndexedTableState;
+use super::class_indexed_state::{ClassIndexedTableState, FoldedQuartetRows};
 use super::compact_digit_source::CompactDigitSource;
 use super::exact_prefix::ExactPrefixLayout;
 use super::range_class_tables::{
@@ -200,7 +200,7 @@ impl<E: Field + Ring> ClassIndexedRangeLeafProver<E> {
     }
 }
 
-impl<E: Field + Ring + Fold + Unreduced> ClassIndexedRangeLeafProver<E> {
+impl<E: Field + Ring + Fold + Unreduced + 'static> ClassIndexedRangeLeafProver<E> {
     /// Compute the existing equality-factored leaf's inner polynomial in
     /// coefficient form. Both the ordinary eq-factored driver and the L2 fused
     /// driver consume this one kernel.
@@ -337,7 +337,7 @@ impl<E: Field + Ring + Fold + Unreduced> ClassIndexedRangeLeafProver<E> {
     }
 }
 
-impl<E: Field + Ring + Fold + Unreduced> EqFactoredSumcheckInstanceProver<E>
+impl<E: Field + Ring + Fold + Unreduced + 'static> EqFactoredSumcheckInstanceProver<E>
     for ClassIndexedRangeLeafProver<E>
 {
     fn num_rounds(&self) -> usize {
@@ -448,18 +448,26 @@ impl<E: Field + Ring + Fold + Unreduced> EqFactoredSumcheckInstanceProver<E>
                     )
                     .entered();
                     let fold_context = E::precompute(challenge);
-                    let padding_pair = folded_pairs.value_by_pair_index(0);
-                    let padding = E::fold_one(&fold_context, padding_pair, padding_pair);
-                    Some(self.quartet_layout.materialize(
-                        |quartet_index| {
-                            let (left_pair, right_pair) =
-                                source.ordered_pair_indices_for_quartet(quartet_index);
-                            let left = folded_pairs.value_by_pair_index(left_pair);
-                            let right = folded_pairs.value_by_pair_index(right_pair);
-                            E::fold_one(&fold_context, left, right)
-                        },
-                        padding,
-                    ))
+                    let fold = |left, right| E::fold_one(&fold_context, left, right);
+                    let row = |i| folded_pairs.value_by_pair_index(i);
+                    let padding = fold(row(0), row(0));
+                    let table = if let Some(quartets) =
+                        FoldedQuartetRows::new(source, E::zero(), row, fold)
+                    {
+                        self.quartet_layout.materialize(
+                            |i| quartets.row(source, i, |left, right| left + right),
+                            padding,
+                        )
+                    } else {
+                        self.quartet_layout.materialize(
+                            |i| {
+                                let (left, right) = source.ordered_pair_indices_for_quartet(i);
+                                fold(row(left), row(right))
+                            },
+                            padding,
+                        )
+                    };
+                    Some(table)
                 }
                 RangeImageTableState::Compact(_) | RangeImageTableState::Materialized(_) => None,
             };

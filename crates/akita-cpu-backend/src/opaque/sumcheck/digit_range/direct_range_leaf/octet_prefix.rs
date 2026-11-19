@@ -19,7 +19,7 @@
 //! folded values are zero, so their weight is not accumulated.
 
 use super::*;
-use crate::opaque::sumcheck::{parallel_tasks, sum_partials};
+use crate::opaque::sumcheck::{add_assign_all, parallel_tasks, sum_partials};
 use std::mem::size_of;
 
 /// Rounds served from the compact table before it is materialized.
@@ -52,11 +52,15 @@ impl HistogramTaskPlan {
 /// of Rayon workers multiply the aggregate class-table allocation past the
 /// fixed byte budget.
 fn histogram_task_plan<E>(tiles: usize, num_classes: usize, workers: usize) -> HistogramTaskPlan {
-    let table_bytes = num_classes * 2 * size_of::<E>();
+    let table_bytes = histogram_table_bytes::<E>(num_classes);
     let max_tables = (HISTOGRAM_BUFFER_BUDGET_BYTES / table_bytes).max(1);
     let requested_tasks = workers.saturating_mul(HISTOGRAM_TASKS_PER_THREAD).max(1);
     let task_count = tiles.min(requested_tasks).min(max_tables);
     HistogramTaskPlan { task_count }
+}
+
+fn histogram_table_bytes<E>(num_classes: usize) -> usize {
+    (num_classes * 2 + 256) * size_of::<E>()
 }
 
 /// Bits of a range-image class: one for basis 4, two for basis 8.
@@ -196,6 +200,108 @@ fn little_endian_word(bytes: &[u8]) -> u64 {
         .fold(0, |word, &byte| word << 8 | u64::from(byte))
 }
 
+#[inline(always)]
+fn constant_octet_pair(left: u16, right: u16) -> Option<usize> {
+    let packed = u32::from(left) | (u32::from(right) << 16);
+    let digits = packed & 0x0303_0303;
+    (digits * 0x55 == packed)
+        .then_some(((digits | (digits >> 6) | (digits >> 12) | (digits >> 18)) & 255) as usize)
+}
+
+fn expand_constant_octet(code: usize) -> usize {
+    ((code & 3) | ((code & 12) << 6)) * 0x55
+}
+
+fn use_constant_octet_pairs(classes: &[u16]) -> bool {
+    let pairs = classes.as_chunks::<2>().0;
+    pairs.len() >= 256
+        && (0..16)
+            .filter(|i| {
+                let [lo, hi] = pairs[pairs.len() * i / 16];
+                lo != hi && constant_octet_pair(lo, hi).is_some()
+            })
+            .count()
+            >= 6
+}
+
+pub(super) struct JointOctetWeights<E> {
+    weights: [E; 256],
+    covered_tiles: Vec<bool>,
+}
+
+impl<E> JointOctetWeights<E> {
+    fn covered(&self, pair: usize) -> bool {
+        self.covered_tiles[pair / HISTOGRAM_TILE_PAIRS]
+    }
+
+    fn covers(&self, pairs: Range<usize>) -> bool {
+        self.covered_tiles
+            [pairs.start / HISTOGRAM_TILE_PAIRS..=(pairs.end - 1) / HISTOGRAM_TILE_PAIRS]
+            .iter()
+            .all(|&covered| covered)
+    }
+}
+
+fn add_marginals<E: Field>(weights: &mut [[E; 2]], [even, odd]: [u16; 2], w: E) {
+    if even != 0 {
+        weights[usize::from(even)][0] += w;
+    }
+    if odd != 0 {
+        weights[usize::from(odd)][1] += w;
+    }
+}
+
+fn accumulate_joint_tile<E: Field>(
+    pairs: &[[u16; 2]],
+    mut index: usize,
+    eq_low: &[E],
+    eq_high: &[E],
+    weights: &mut [[E; 2]],
+    joint: &mut [E; 256],
+) {
+    let mut start = 0;
+    while start < pairs.len() {
+        let low = index & (eq_low.len() - 1);
+        let high = eq_high[index / eq_low.len()];
+        let end = pairs.len().min(start + eq_low.len() - low);
+        let mut margins = [[E::zero(); 2]; 16];
+        let mut bins = [E::zero(); 256];
+        for (&[a, b], &weight) in pairs[start..end].iter().zip(&eq_low[low..]) {
+            if let Some(code) = constant_octet_pair(a, b) {
+                let l = code & 15;
+                let r = code >> 4;
+                if l != 0 {
+                    margins[l][0] += weight;
+                }
+                if r != 0 {
+                    margins[r][1] += weight;
+                }
+                if l != r {
+                    bins[code] += weight;
+                }
+            } else {
+                debug_assert_eq!(a, b);
+                add_marginals(weights, [a, b], high * weight);
+            }
+        }
+        for (code, bin) in margins.into_iter().enumerate().skip(1) {
+            let target = &mut weights[expand_constant_octet(code)];
+            for (value, w) in target.iter_mut().zip(bin) {
+                if !w.is_zero() {
+                    *value += high * w;
+                }
+            }
+        }
+        for (target, w) in joint.iter_mut().zip(bins) {
+            if !w.is_zero() {
+                *target += high * w;
+            }
+        }
+        index += end - start;
+        start = end;
+    }
+}
+
 /// Sum the round-3 equality weight `e_first[p & mask] * e_second[p >> bits]`
 /// of every live octet pair `p` into the classes of its even (`[0]`) and odd
 /// (`[1]`) octets.
@@ -207,51 +313,80 @@ fn octet_pair_class_weights<E: Field>(
     live_pairs: usize,
     e_first: &[E],
     e_second: &[E],
-) -> Vec<[E; 2]> {
+) -> (Vec<[E; 2]>, Option<Box<JointOctetWeights<E>>>) {
     let num_classes = 1usize << (8 * reader.class_bits);
     let first_mask = e_first.len() - 1;
     let first_bits = e_first.len().trailing_zeros();
     let tiles = live_pairs.div_ceil(HISTOGRAM_TILE_PAIRS);
     let task_plan = histogram_task_plan::<E>(tiles, num_classes, parallel_tasks(1));
-    let mut tables: Vec<Vec<[E; 2]>> = cfg_into_iter!(0..task_plan.task_count)
+    let can_use_joint = reader.class_bits == 2 && e_first.len() >= 256;
+    let mut tables: Vec<_> = cfg_into_iter!(0..task_plan.task_count)
         .map(|task| {
             let mut weights = vec![[E::zero(); 2]; num_classes];
-            for tile in task_plan.tile_range(task, tiles) {
+            let tiles = task_plan.tile_range(task, tiles);
+            let mut joint = JointOctetWeights {
+                weights: [E::zero(); 256],
+                covered_tiles: Vec::new(),
+            };
+            for tile in tiles {
                 let start = tile * HISTOGRAM_TILE_PAIRS;
                 let end = (start + HISTOGRAM_TILE_PAIRS).min(live_pairs);
                 let classes = reader.classes(2 * start..2 * end);
-                for (pair, classes) in (start..end).zip(classes.chunks_exact(2)) {
-                    let (even, odd) = (usize::from(classes[0]), usize::from(classes[1]));
-                    if even | odd == 0 {
-                        continue;
-                    }
-                    let weight = e_first[pair & first_mask] * e_second[pair >> first_bits];
-                    if even != 0 {
-                        weights[even][0] += weight;
-                    }
-                    if odd != 0 {
-                        weights[odd][1] += weight;
+                let pairs = classes.as_chunks::<2>().0;
+                let covered = can_use_joint
+                    && use_constant_octet_pairs(&classes)
+                    && pairs
+                        .iter()
+                        .all(|&[a, b]| a == b || constant_octet_pair(a, b).is_some());
+                if can_use_joint {
+                    joint.covered_tiles.push(covered);
+                }
+                if covered {
+                    accumulate_joint_tile(
+                        pairs,
+                        start,
+                        e_first,
+                        e_second,
+                        &mut weights,
+                        &mut joint.weights,
+                    );
+                } else {
+                    for (pair, &[even, odd]) in (start..end).zip(pairs) {
+                        if even | odd != 0 {
+                            let weight = e_first[pair & first_mask] * e_second[pair >> first_bits];
+                            add_marginals(&mut weights, [even, odd], weight);
+                        }
                     }
                 }
             }
-            weights
+            (weights, joint)
         })
         .collect();
-    let Some((totals, rest)) = tables.split_first_mut() else {
-        return vec![[E::zero(); 2]; num_classes];
+    let Some(((totals, _), rest)) = tables.split_first_mut() else {
+        return (vec![[E::zero(); 2]; num_classes], None);
     };
     cfg_chunks_mut!(totals, HISTOGRAM_MERGE_CLASSES)
         .enumerate()
         .for_each(|(chunk, totals)| {
             let first = chunk * HISTOGRAM_MERGE_CLASSES;
-            for table in rest.iter() {
+            for (table, _) in rest.iter() {
                 for (total, weight) in totals.iter_mut().zip(&table[first..]) {
                     total[0] += weight[0];
                     total[1] += weight[1];
                 }
             }
         });
-    tables.swap_remove(0)
+    let (totals, mut initial) = tables.remove(0);
+    for (_, mut task) in tables {
+        initial.covered_tiles.append(&mut task.covered_tiles);
+        add_assign_all(&mut initial.weights, &task.weights);
+    }
+    let joint = initial
+        .covered_tiles
+        .iter()
+        .any(|&covered| covered)
+        .then(|| Box::new(initial));
+    (totals, joint)
 }
 
 /// Class-table tasks per worker: enough for load balance across uneven cores,
@@ -357,7 +492,7 @@ impl<E: Field + Ring + Unreduced> OctetPrefix<E> {
         let (e_first, e_second) = split_eq.remaining_eq_tables_after(3).ok_or_else(|| {
             AkitaError::Internal("octet prefix has fewer than four rounds".into())
         })?;
-        let octet_pair_class_weights = octet_pair_class_weights(
+        let (octet_pair_class_weights, compact_pairs) = octet_pair_class_weights(
             &OctetClassReader::new(&digits, class_bits, width),
             digits.len().div_ceil(16),
             e_first,
@@ -384,6 +519,7 @@ impl<E: Field + Ring + Unreduced> OctetPrefix<E> {
                 weights: PrefixWeights {
                     octet_class_weights,
                     octet_pair_class_weights,
+                    compact_pairs,
                 },
             },
         })
@@ -410,24 +546,47 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
             DirectRangePrefixState::Round3 {
                 octet_terms,
                 octet_pair_class_weights,
+                compact_pairs,
             } => {
                 let terms = octet_terms.as_slice();
                 let class_bits = class_bits(self.basis);
                 let precomputation = &self.range_poly;
                 let reader = OctetClassReader::new(source, class_bits, prefix.width);
-                let mut sums = self.compute_round_live_prefix(source.len().div_ceil(16), |pairs| {
-                    let start = pairs.start;
-                    let classes = reader.classes(2 * start..2 * pairs.end);
-                    move |pair, weight, sums| {
-                        let local = 2 * (pair - start);
-                        precomputation.accumulate_octet_pair_terms(
-                            sums,
-                            &terms[usize::from(classes[local])],
-                            &terms[usize::from(classes[local + 1])],
-                            weight,
-                        );
+                let compact = compact_pairs.as_deref();
+                let mut sums = self.compute_round_live_prefix_filtered(
+                    source.len().div_ceil(16),
+                    |pairs| compact.is_none_or(|joint| !joint.covers(pairs)),
+                    |pairs| {
+                        let start = pairs.start;
+                        let classes = reader.classes(2 * start..2 * pairs.end);
+                        move |pair, weight, sums| {
+                            if compact.is_none_or(|joint| !joint.covered(pair)) {
+                                let local = 2 * (pair - start);
+                                let (lo, hi) = (classes[local], classes[local + 1]);
+                                if lo != hi {
+                                    precomputation.accumulate_octet_pair_terms(
+                                        sums,
+                                        &terms[usize::from(lo)],
+                                        &terms[usize::from(hi)],
+                                        weight,
+                                    );
+                                }
+                            }
+                        }
+                    },
+                );
+                if let Some(joint) = compact {
+                    for (code, &weight) in joint.weights.iter().enumerate() {
+                        if !weight.is_zero() {
+                            precomputation.accumulate_octet_pair_terms(
+                                &mut sums,
+                                &terms[expand_constant_octet(code & 15)],
+                                &terms[expand_constant_octet(code >> 4)],
+                                weight,
+                            );
+                        }
                     }
-                });
+                }
                 sums[0] = octet_range_difference(terms, octet_pair_class_weights, &self.range_poly);
                 self.range_poly
                     .round_poly_from_sums(&sums, LinearSum::RangeDifference)
@@ -507,18 +666,40 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
             } => DirectRangePrefixState::Round3 {
                 octet_terms: octet_class_terms(&self.range_poly, &quad_values, r),
                 octet_pair_class_weights: weights.octet_pair_class_weights,
+                compact_pairs: weights.compact_pairs,
             },
             DirectRangePrefixState::Round3 { octet_terms, .. } => {
                 let terms = octet_terms.as_slice();
                 let next_live = source.len().div_ceil(8).div_ceil(2);
                 let reader = OctetClassReader::new(&source, class_bits, width);
+                let folded_pairs = (class_bits == 2).then(|| {
+                    std::array::from_fn::<_, 256, _>(|code| {
+                        let left = terms[expand_constant_octet(code & 15)].value;
+                        let right = terms[expand_constant_octet(code >> 4)].value;
+                        left + r * (right - left)
+                    })
+                });
                 let folds_for_tile = |entries: Range<usize>| {
                     let start = entries.start;
                     let classes = reader.classes(2 * start..2 * entries.end);
+                    let folded_pairs = folded_pairs
+                        .as_ref()
+                        .filter(|_| use_constant_octet_pairs(&classes));
                     move |entry: usize| {
                         let local = 2 * (entry - start);
-                        let left = terms[usize::from(classes[local])].value;
-                        left + r * (terms[usize::from(classes[local + 1])].value - left)
+                        let (lo, hi) = (classes[local], classes[local + 1]);
+                        if let Some(value) = folded_pairs
+                            .filter(|_| lo != hi)
+                            .and_then(|table| constant_octet_pair(lo, hi).map(|code| table[code]))
+                        {
+                            return value;
+                        }
+                        let left = terms[usize::from(lo)].value;
+                        if lo == hi {
+                            left
+                        } else {
+                            left + r * (terms[usize::from(hi)].value - left)
+                        }
                     }
                 };
                 let (range_image, next_round_poly) = if self.rounds_completed + 1 < self.num_vars {
@@ -575,7 +756,7 @@ mod histogram_tests {
     fn histogram_task_plan_caps_aggregate_tables_for_worker_counts() {
         let num_classes = 1 << 16;
         let tiles = 256;
-        let table_bytes = num_classes * 2 * size_of::<Prime128Offset275>();
+        let table_bytes = histogram_table_bytes::<Prime128Offset275>(num_classes);
         let max_tables = (HISTOGRAM_BUFFER_BUDGET_BYTES / table_bytes).max(1);
         let workers_and_expected = [
             (1, 2.min(max_tables)),
@@ -608,7 +789,7 @@ mod histogram_tests {
             .map(|i| F::from_u64(i as u64 + 11))
             .collect();
         let num_classes = 1 << 8;
-        let actual = octet_pair_class_weights(&reader, live_pairs, &e_first, &e_second);
+        let (actual, _) = octet_pair_class_weights(&reader, live_pairs, &e_first, &e_second);
 
         let mut expected = vec![[F::zero(); 2]; num_classes];
         let classes = reader.classes(0..2 * live_pairs);

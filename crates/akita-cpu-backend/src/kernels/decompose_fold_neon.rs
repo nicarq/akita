@@ -158,6 +158,13 @@ pub(crate) unsafe fn sparse_mul_acc_i16_pm1_neon(
     negative: &[u32],
 ) {
     debug_assert!(d.is_multiple_of(8));
+    let tap_count = positive.len() + negative.len();
+    if matches!(d, 512 | 1024 | 2048)
+        && (16..=64).contains(&tap_count)
+        && accumulate_i16_destination_tiles(digit_plane, acc, d, positive, negative)
+    {
+        return;
+    }
     for &position in positive {
         let position = position as usize;
         let split = d - position;
@@ -174,6 +181,67 @@ pub(crate) unsafe fn sparse_mul_acc_i16_pm1_neon(
             acc_segment_i16_add(digit_plane.add(split), acc, position);
         }
     }
+}
+
+#[inline(never)]
+unsafe fn accumulate_i16_destination_tiles(
+    digits: *const i16,
+    dst: *mut i32,
+    d: usize,
+    positive: &[u32],
+    negative: &[u32],
+) -> bool {
+    const TILE: usize = 64;
+    let mut scratch = std::mem::MaybeUninit::<[[i16; 2048]; 3]>::uninit();
+    let rotated = scratch.as_mut_ptr().cast::<i16>();
+    let mut minimum = vdupq_n_s16(0);
+    let mut nonzero = vdupq_n_s16(0);
+    for i in (0..d).step_by(8) {
+        let values = vld1q_s16(digits.add(i));
+        minimum = vminq_s16(minimum, values);
+        nonzero = vorrq_s16(nonzero, values);
+        let negated = vnegq_s16(values);
+        // SAFETY: the three ranges cover exactly the initialized 3*d values.
+        vst1q_s16(rotated.add(i), negated);
+        vst1q_s16(rotated.add(d + i), values);
+        vst1q_s16(rotated.add(2 * d + i), negated);
+    }
+    if vmaxvq_u16(vreinterpretq_u16_s16(nonzero)) == 0 {
+        return true;
+    }
+    if vminvq_s16(minimum) == i16::MIN {
+        return false;
+    }
+
+    let mut offsets = [0usize; 64];
+    let (plus, minus) = offsets[..positive.len() + negative.len()].split_at_mut(positive.len());
+    for (offset, &shift) in plus.iter_mut().zip(positive) {
+        *offset = d - shift as usize;
+    }
+    for (offset, &shift) in minus.iter_mut().zip(negative) {
+        *offset = 2 * d - shift as usize;
+    }
+
+    for start in (0..d).step_by(TILE) {
+        let mut sums: [[int32x4_t; 2]; TILE / 8] = std::array::from_fn(|i| {
+            [
+                vld1q_s32(dst.add(start + 8 * i)),
+                vld1q_s32(dst.add(start + 8 * i + 4)),
+            ]
+        });
+        for &offset in &offsets[..positive.len() + negative.len()] {
+            for (i, [low, high]) in sums.iter_mut().enumerate() {
+                let values = vld1q_s16(rotated.add(offset + start + 8 * i));
+                *low = vaddw_s16(*low, vget_low_s16(values));
+                *high = vaddw_high_s16(*high, values);
+            }
+        }
+        for (i, [low, high]) in sums.into_iter().enumerate() {
+            vst1q_s32(dst.add(start + 8 * i), low);
+            vst1q_s32(dst.add(start + 8 * i + 4), high);
+        }
+    }
+    true
 }
 
 #[inline(always)]

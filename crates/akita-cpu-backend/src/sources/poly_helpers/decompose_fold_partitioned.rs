@@ -453,8 +453,11 @@ pub(crate) fn element_partitioned_decompose_fold<S: BlockDigits<D>, const D: usi
                     ChallengePlan::NarrowFull(..) | ChallengePlan::NarrowChunked(_)
                 )
             });
+            let repeated = source
+                .rings_repeat_within_full_blocks(ring_start..ring_end, num_positions_per_block);
+            let folded_width = if repeated { num_digits } else { inner_width };
             let mut out = vec![[0i32; D]; inner_width];
-            cfg_chunks_mut!(out, position_tile * num_digits)
+            cfg_chunks_mut!(out[..folded_width], position_tile * num_digits)
                 .enumerate()
                 .try_for_each(|(tile_idx, acc)| {
                     let elem_start = tile_idx * position_tile;
@@ -490,6 +493,12 @@ pub(crate) fn element_partitioned_decompose_fold<S: BlockDigits<D>, const D: usi
                     accumulator.finish();
                     Ok::<(), AkitaError>(())
                 })?;
+            if repeated {
+                let (first_position, remaining) = out.split_at_mut(num_digits);
+                for position in remaining.chunks_exact_mut(num_digits) {
+                    position.copy_from_slice(first_position);
+                }
+            }
             Ok(out)
         })
         .collect()

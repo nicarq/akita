@@ -19,7 +19,7 @@ enum ActiveStage<E: Field> {
     Fused(FusedRangeNormProver<E>),
 }
 
-impl<E: Field + Ring + Fold + Unreduced> ActiveStage<E> {
+impl<E: Field + Ring + Fold + Unreduced + 'static> ActiveStage<E> {
     fn step(&self, product_index: usize) -> Stage1Step {
         match self {
             Self::Low(_) | Self::Leaf(_) => Stage1Step::RangeLeaf,
@@ -167,7 +167,7 @@ pub(crate) struct DigitRangeSession<E: Field> {
     final_virtual_evaluations: Option<Vec<E>>,
 }
 
-impl<E: Field + Ring + Fold + Unreduced> DigitRangeSession<E> {
+impl<E: Field + Ring + Fold + Unreduced + 'static> DigitRangeSession<E> {
     pub(crate) fn new(
         prover: DigitRangeProver<E>,
         physical: Option<akita_types::PhysicalResponsePlan>,

@@ -17,6 +17,7 @@ fn assert_independent_rounds(
     col_bits: usize,
     ring_bits: usize,
     live_x_cols: usize,
+    repeat_quads: bool,
 ) {
     let half = (basis / 2) as i64;
     // Balanced digits -b/2..b/2 have paired images k(k+1); each distinct
@@ -39,6 +40,11 @@ fn assert_independent_rounds(
     let num_vars = col_bits + ring_bits;
     let witness: Vec<i8> = (0..live_x_cols << ring_bits)
         .map(|i| {
+            let i = if repeat_quads && i / 16 % 13 != 7 {
+                i / 4
+            } else {
+                i
+            };
             let mixed = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58;
             (mixed as usize % basis) as i8 - half as i8
         })
@@ -54,7 +60,9 @@ fn assert_independent_rounds(
             digit * (digit + F::one())
         })
         .collect();
-    table.resize(1 << num_vars, F::zero());
+    if !repeat_quads {
+        table.resize(1 << num_vars, F::zero());
+    }
     let mut prover = LowBasisRangeCheckProver::new(
         PackedSignedDigits::from_i8_digits(witness, bit_width).unwrap(),
         &tau,
@@ -75,7 +83,7 @@ fn assert_independent_rounds(
         assert_eq!(message.degree(), roots.len(), "{shape} round={round}");
         // claim = (1-tau)q(0) + tau*q(1), hence q(0) = claim - tau*sum(q_i).
         let constant = normalized_claim - tau[round] * message.nonconstant_term_sum_at_one();
-        let weights: Vec<F> = (0..table.len() / 2)
+        let weights: Vec<F> = (0..table.len().div_ceil(2))
             .map(|index| {
                 tau[round + 1..]
                     .iter()
@@ -95,10 +103,11 @@ fn assert_independent_rounds(
         for point in 0..=roots.len() {
             let x = F::from_u64(point as u64);
             let expected: F = table
-                .chunks_exact(2)
+                .chunks(2)
                 .zip(&weights)
                 .map(|(pair, &weight)| {
-                    let folded = (F::one() - x) * pair[0] + x * pair[1];
+                    let right = pair.get(1).copied().unwrap_or_else(F::zero);
+                    let folded = (F::one() - x) * pair[0] + x * right;
                     weight * root_product(folded, &roots)
                 })
                 .sum();
@@ -111,8 +120,8 @@ fn assert_independent_rounds(
         let r = F::from_u64(5 * round as u64 + 71);
         normalized_claim = constant + message.evaluate_nonconstant_terms(r);
         table = table
-            .chunks_exact(2)
-            .map(|pair| (F::one() - r) * pair[0] + r * pair[1])
+            .chunks(2)
+            .map(|pair| (F::one() - r) * pair[0] + r * pair.get(1).copied().unwrap_or_else(F::zero))
             .collect();
         prover.ingest_challenge(round, r);
     }
@@ -156,8 +165,20 @@ fn stage1_rounds_match_independent_root_product_reference() {
         let log_basis = basis.trailing_zeros() as u8;
         for bit_width in [log_basis, log_basis + 1, 8] {
             for (col_bits, ring_bits, live_x_cols) in SHAPES {
-                assert_independent_rounds(basis, bit_width, col_bits, ring_bits, live_x_cols);
+                assert_independent_rounds(
+                    basis,
+                    bit_width,
+                    col_bits,
+                    ring_bits,
+                    live_x_cols,
+                    false,
+                );
             }
         }
     }
+}
+
+#[test]
+fn weighted_octet_pairs_match_the_complete_stage1_reference() {
+    assert_independent_rounds(8, 3, 18, 6, 256, true);
 }

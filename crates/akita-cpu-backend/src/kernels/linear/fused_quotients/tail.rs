@@ -113,6 +113,53 @@ fn centered_quotient_rows_with_i16_tail_params<
     ))
 }
 
+pub(crate) fn small_field_matrix_a_quotients_with_tail<
+    F: Field + CanonicalEncoding,
+    const D: usize,
+>(
+    matrix: &[CyclotomicRing<F, D>],
+    rows: usize,
+    rhs: &[[i32; D]],
+    norm: u32,
+    log_basis_outer: u32,
+) -> Result<Option<Vec<CyclotomicRing<F, D>>>, AkitaError> {
+    use akita_algebra::ntt::tables::I16_TAIL_PRIME;
+
+    fused_quotient_digit_bound(log_basis_outer)?;
+
+    let ProtocolCrtNttParams::Q64(params) = select_crt_ntt_params::<F, D>()? else {
+        return Ok(None);
+    };
+    let bound = u64::from(norm).max(centered_rows_abs_bound(rhs, rhs.len()));
+    let capacity = params
+        .crt_capacity()
+        .with_prime_modulus(I16_TAIL_PRIME.p as u128);
+    if !capacity.supports::<F, D>(1, bound) {
+        return Ok(None);
+    }
+    let tail_params = CrtNttParamSet::<i16, 1, D>::new([I16_TAIL_PRIME]);
+    let (neg, cyc): (Vec<_>, Vec<_>) = matrix
+        .iter()
+        .map(|ring| CyclotomicCrtNtt::from_ring_pair_with_params(ring, &params))
+        .unzip();
+    let (tail_neg, tail_cyc): (Vec<_>, Vec<_>) = matrix
+        .iter()
+        .map(|ring| CyclotomicCrtNtt::from_ring_pair_with_params(ring, &tail_params))
+        .unzip();
+    centered_quotient_rows_with_i16_tail_params(
+        &neg,
+        &cyc,
+        &tail_neg,
+        &tail_cyc,
+        rows,
+        rhs,
+        norm,
+        &params,
+        &tail_params,
+    )
+    .map(Some)
+}
+
 /// Centered A-quotient rows using the protocol CRT prefix plus its 14-bit tail.
 pub fn centered_quotient_rows_with_i16_tail<F: Field + CanonicalEncoding, const D: usize>(
     negacyclic_slot: &PreparedNttCache<D>,

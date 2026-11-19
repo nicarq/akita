@@ -4,6 +4,8 @@ mod scalar;
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+mod centered_aarch64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -355,6 +357,83 @@ impl PackedSignedDigitWriter {
         Ok(())
     }
 
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    pub(crate) fn try_write_centered_rows<const D: usize>(
+        &mut self,
+        start: usize,
+        rows: &[[i32; D]],
+        levels: usize,
+        basis: u32,
+    ) -> Result<bool, AkitaError> {
+        if !matches!(self.bit_width, 3 | 4)
+            || basis != u32::from(self.bit_width)
+            || D == 0
+            || !D.is_multiple_of(DIGITS_PER_BLOCK)
+            || !start.is_multiple_of(DIGITS_PER_BLOCK)
+            || rows.is_empty()
+            || levels == 0
+            || !std::arch::is_aarch64_feature_detected!("neon")
+        {
+            return Ok(false);
+        }
+        let len = checked::product([rows.len(), D, levels]).ok_or_else(|| {
+            AkitaError::InvalidInput("centered digit write length overflow".into())
+        })?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| AkitaError::InvalidInput("centered digit write end overflow".into()))?;
+        if start < self.position {
+            return Err(AkitaError::InvalidInput(
+                "packed signed-digit writes must be in physical order".into(),
+            ));
+        }
+        if end > self.len {
+            return Err(AkitaError::InvalidSize {
+                expected: self.len,
+                actual: end,
+            });
+        }
+        let split = self.position % DIGITS_PER_BLOCK;
+        if split != 0 {
+            self.flush_pending(self.position - split)?;
+        }
+        let width = self.bit_width;
+        let encoded_start = encoded_byte_len(start, width);
+        let encoded_end = encoded_byte_len(end, width);
+        let storage = Arc::get_mut(&mut self.storage).ok_or_else(|| {
+            AkitaError::Internal("packed write storage is not uniquely owned".into())
+        })?;
+        let output = &mut storage[encoded_start..encoded_end];
+        let encode = |rows: &[[i32; D]], output: &mut [u8]| {
+            // SAFETY: NEON availability and aligned extents were checked above.
+            unsafe { centered_aarch64::encode(rows, levels, width, output) }
+        };
+        #[cfg(feature = "parallel")]
+        let bounds = {
+            const ROWS_PER_TASK: usize = 64;
+            let bytes = encoded_byte_len(D * levels, width);
+            if rows.len() >= ROWS_PER_TASK * 2 && bytes.checked_mul(ROWS_PER_TASK).is_some() {
+                rows.par_chunks(ROWS_PER_TASK)
+                    .zip(output.par_chunks_mut(bytes * ROWS_PER_TASK))
+                    .map(|(rows, output)| encode(rows, output))
+                    .reduce(
+                        || SignedDigitBounds::ZERO,
+                        |mut left, right| {
+                            left.include_bounds(right);
+                            left
+                        },
+                    )
+            } else {
+                encode(rows, output)
+            }
+        };
+        #[cfg(not(feature = "parallel"))]
+        let bounds = encode(rows, output);
+        self.bounds.include_bounds(bounds);
+        self.position = end;
+        Ok(true)
+    }
+
     pub(crate) fn finish(mut self) -> Result<PackedSignedDigits, AkitaError> {
         let split = self.position % DIGITS_PER_BLOCK;
         if split != 0 {
@@ -595,6 +674,24 @@ impl<'a> PackedSignedDigitView<'a> {
             decoded_len: 0,
             decoded: [0; DIGITS_PER_BLOCK],
         }
+    }
+
+    pub(crate) fn aligned_bytes(self, range: Range<usize>) -> Option<&'a [u8]> {
+        if range.start > range.end || range.end > self.len {
+            return None;
+        }
+        let start = self.start + range.start;
+        let end = self.start + range.end;
+        if end > self.stored_len {
+            return None;
+        }
+        let width = usize::from(self.bit_width);
+        let first_bit = start.checked_mul(width)?;
+        let last_bit = end.checked_mul(width)?;
+        if !first_bit.is_multiple_of(8) || !last_bit.is_multiple_of(8) {
+            return None;
+        }
+        self.storage.get(first_bit / 8..last_bit / 8)
     }
 
     pub(crate) fn decode_array<const N: usize>(self, start: usize) -> Result<[i8; N], AkitaError> {

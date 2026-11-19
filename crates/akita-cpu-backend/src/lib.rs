@@ -33,7 +33,7 @@ pub use opaque::{
 };
 pub use opaque::{CommitOutput, CommitmentHandle, CpuSource, SourceHandle};
 pub use setup::AkitaProverSetup;
-pub use sources::{DensePoly, OneHotIndex, OneHotPoly, OneHotSource};
+pub use sources::{DensePoly, FieldRunPoly, OneHotIndex, OneHotPoly, OneHotSource};
 
 /// Extension contracts for application-owned CPU polynomial sources.
 ///

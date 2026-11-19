@@ -270,3 +270,32 @@ fn stage2_norm_histogram_rejects_wrong_class_count() {
         }
     }
 }
+
+#[test]
+fn basis16_marginals_match_the_complete_class_histogram() {
+    use jolt_field::{Ext2, Prime64Offset59};
+    type F = Prime64Offset59;
+    type E = Ext2<F>;
+    let full: Vec<_> = (0..1u64 << 16)
+        .map(|i| {
+            E::new(
+                F::from_u64(i.wrapping_mul(175638511)),
+                F::from_u64(i.pow(2) + 3341),
+            )
+        })
+        .collect();
+    let mut bins = vec![E::zero(); BASIS16_MARGINAL_COUNT];
+    for (class, &weight) in full.iter().enumerate() {
+        add_basis16_marginals(&mut bins, class as u16, weight);
+    }
+    let [tau0, tau1, batching, challenge] = [17, 24, 9371, 17661].map(E::from_u64);
+    let baseline =
+        Stage2PrefixCache::from_norm_histogram(&full, PrefixBasis::B16, tau0, tau1, batching)
+            .unwrap();
+    let candidate = Stage2PrefixCache::from_basis16_marginals(&bins, tau0, tau1, batching);
+    assert_eq!(candidate.round0_norm_poly(), baseline.round0_norm_poly());
+    assert_eq!(
+        candidate.round1_norm_poly(challenge),
+        baseline.round1_norm_poly(challenge)
+    );
+}

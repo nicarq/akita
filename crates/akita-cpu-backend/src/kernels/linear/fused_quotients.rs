@@ -9,6 +9,7 @@ pub(super) use planning::fused_test_plan_route;
 use planning::*;
 
 pub use tail::centered_quotient_rows_with_i16_tail;
+pub(crate) use tail::small_field_matrix_a_quotients_with_tail;
 
 /// Minimum number of Rayon work-units for the fused one-shot kernel.
 const MIN_FUSED_TILES: usize = 30;

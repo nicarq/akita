@@ -1,6 +1,6 @@
 //! Class-indexed product-subcheck prover and specialized coefficient kernels.
 
-use super::class_indexed_state::ClassIndexedTableState;
+use super::class_indexed_state::{ClassIndexedTableState, FoldedQuartetRows};
 use super::compact_digit_source::CompactDigitSource;
 use super::exact_prefix::ExactPrefixLayout;
 #[cfg(test)]
@@ -453,8 +453,8 @@ impl<E: Field + Ring, const LANES: usize> ClassIndexedProductSubcheckProver<E, L
     }
 }
 
-impl<E: Field + Ring + Fold + Unreduced, const LANES: usize> EqFactoredSumcheckInstanceProver<E>
-    for ClassIndexedProductSubcheckProver<E, LANES>
+impl<E: Field + Ring + Fold + Unreduced + 'static, const LANES: usize>
+    EqFactoredSumcheckInstanceProver<E> for ClassIndexedProductSubcheckProver<E, LANES>
 {
     fn num_rounds(&self) -> usize {
         self.num_rounds
@@ -660,22 +660,34 @@ impl<E: Field + Ring + Fold + Unreduced, const LANES: usize> EqFactoredSumcheckI
                     )
                     .entered();
                     let fold_context = E::precompute(challenge);
-                    let padding_pair = folded_pairs.row_by_pair_index(0);
-                    let padding = std::array::from_fn(|lane| {
-                        E::fold_one(&fold_context, padding_pair[lane], padding_pair[lane])
-                    });
-                    Some(self.quartet_layout.materialize(
-                        |quartet_index| {
-                            let (left_pair, right_pair) =
-                                source.ordered_pair_indices_for_quartet(quartet_index);
-                            let left = folded_pairs.row_by_pair_index(left_pair);
-                            let right = folded_pairs.row_by_pair_index(right_pair);
-                            std::array::from_fn(|lane| {
-                                E::fold_one(&fold_context, left[lane], right[lane])
-                            })
-                        },
-                        padding,
-                    ))
+                    let fold = |left: [E; LANES], right: [E; LANES]| {
+                        std::array::from_fn(|lane| {
+                            E::fold_one(&fold_context, left[lane], right[lane])
+                        })
+                    };
+                    let row = |i| folded_pairs.row_by_pair_index(i);
+                    let padding = fold(row(0), row(0));
+                    let table = if let Some(quartets) =
+                        FoldedQuartetRows::new(source, [E::zero(); LANES], row, fold)
+                    {
+                        self.quartet_layout.materialize(
+                            |i| {
+                                quartets.row(source, i, |left: [E; LANES], right: [E; LANES]| {
+                                    std::array::from_fn(|lane| left[lane] + right[lane])
+                                })
+                            },
+                            padding,
+                        )
+                    } else {
+                        self.quartet_layout.materialize(
+                            |i| {
+                                let (left, right) = source.ordered_pair_indices_for_quartet(i);
+                                fold(row(left), row(right))
+                            },
+                            padding,
+                        )
+                    };
+                    Some(table)
                 }
                 ProductTableState::Compact(_) | ProductTableState::Materialized(_) => None,
             };
