@@ -2,6 +2,23 @@ use super::*;
 use crate::opaque::sumcheck::{single_row_tile_pairs, sum_partials};
 use jolt_poly::OmittedConstantPoly;
 
+#[derive(Clone, Copy)]
+struct ZeroPages<'a> {
+    masks: &'a [u8],
+    page_pairs: usize,
+}
+
+impl ZeroPages<'_> {
+    fn is_zero(self, pair: usize) -> bool {
+        let page = pair / self.page_pairs;
+        self.masks[page / 8] & (1 << (page % 8)) != 0
+    }
+
+    fn remaining_in_page(self, pair: usize) -> usize {
+        self.page_pairs - (pair & (self.page_pairs - 1))
+    }
+}
+
 /// Accumulate the weighted sums of pairs `tile` of a flat live-prefix table.
 ///
 /// `entry(pair, weight, sums)` adds `weight` times the sums of one pair. Blocks
@@ -14,6 +31,7 @@ fn accumulate_live_prefix_tile<E: Field + Unreduced>(
     e_second: &[E],
     block_size: usize,
     tile: Range<usize>,
+    zero_pages: Option<ZeroPages<'_>>,
     mut entry: impl FnMut(usize, E, &mut TaylorSums<E>),
 ) -> TaylorSums<E> {
     debug_assert!(num_coeffs_q <= MAX_DIRECT_RANGE_COEFFICIENTS);
@@ -24,12 +42,26 @@ fn accumulate_live_prefix_tile<E: Field + Unreduced>(
     while block_start < tile.end {
         let block_end = (block_start + block_size).min(tile.end);
         let mut block_accumulator = [E::Product::zero(); MAX_DIRECT_RANGE_COEFFICIENTS];
-        for pair_index in block_start..block_end {
-            entry(
-                pair_index,
-                e_first[pair_index & (num_first - 1)],
-                &mut block_accumulator,
-            );
+        let mut add = |range: Range<usize>| {
+            for pair_index in range {
+                entry(
+                    pair_index,
+                    e_first[pair_index & (num_first - 1)],
+                    &mut block_accumulator,
+                );
+            }
+        };
+        if let Some(pages) = zero_pages {
+            let mut i = block_start;
+            while i < block_end {
+                let end = block_end.min(i + pages.remaining_in_page(i));
+                if !pages.is_zero(i) {
+                    add(i..end);
+                }
+                i = end;
+            }
+        } else {
+            add(block_start..block_end);
         }
 
         let equality_suffix = e_second[block_start >> first_bits];
@@ -46,6 +78,16 @@ fn accumulate_live_prefix_tile<E: Field + Unreduced>(
 }
 
 impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
+    fn zero_pages_at(&self, round: usize) -> Option<ZeroPages<'_>> {
+        if self.zero_pages.is_empty() || !(4..=11).contains(&round) {
+            return None;
+        }
+        Some(ZeroPages {
+            masks: &self.zero_pages,
+            page_pairs: 1 << (11 - round),
+        })
+    }
+
     /// Accumulate the current round's weighted pair sums over a flat
     /// live-prefix table with `live_pairs` live pairs.
     ///
@@ -86,6 +128,7 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
                     e_second,
                     block_size,
                     tile.clone(),
+                    self.zero_pages_at(self.rounds_completed),
                     entries_for_tile(tile),
                 )
             })
@@ -121,6 +164,16 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
                 let tile_start = tile * tile_pairs;
                 let tile_end = tile_start + tile_out.len().div_ceil(2);
                 let entry_start = 2 * tile_start;
+                let pages = self.zero_pages_at(self.rounds_completed + 1);
+                if pages.is_some_and(|p| {
+                    let mut i = tile_start;
+                    while i < tile_end && p.is_zero(i) {
+                        i += p.remaining_in_page(i);
+                    }
+                    i >= tile_end
+                }) {
+                    return [E::Product::zero(); MAX_DIRECT_RANGE_COEFFICIENTS];
+                }
                 let mut fold = folds_for_tile(entry_start..entry_start + tile_out.len());
                 accumulate_live_prefix_tile(
                     num_coeffs_q,
@@ -128,6 +181,7 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
                     e_second,
                     block_size,
                     tile_start..tile_end,
+                    pages,
                     |pair, weight, sums| {
                         let local_left = 2 * (pair - tile_start);
                         let left = fold(entry_start + local_left);
@@ -155,9 +209,13 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
 
     /// Fold a flat live-prefix table at `r`, zero-padding an odd tail.
     #[tracing::instrument(skip_all, name = "LowBasisRangeCheckProver::fold_live_prefix")]
-    pub(super) fn fold_live_prefix(range_image: &[E], r: E) -> Vec<E> {
+    pub(super) fn fold_live_prefix(range_image: &[E], r: E) -> Vec<E>
+    where
+        E: Fold,
+    {
+        let ctx = E::precompute(r);
         cfg_into_iter!(0..range_image.len().div_ceil(2))
-            .map(|pair| fold_prefix_pair_with_zero_padding(range_image, 2 * pair, r))
+            .map(|pair| fold_prefix_pair_with_zero_padding(range_image, 2 * pair, &ctx))
             .collect()
     }
 }

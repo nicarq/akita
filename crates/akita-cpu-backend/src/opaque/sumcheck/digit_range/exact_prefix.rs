@@ -91,35 +91,27 @@ impl<T: Copy> ExactPrefixTable<T> {
         let next_explicit_len = self.explicit.len().div_ceil(2);
         let explicit_len = self.explicit.len();
         let default = self.default;
-        let sequential_len = next_explicit_len.min(EXACT_PREFIX_SEQUENTIAL_LEN);
-        for pair_index in 0..sequential_len {
-            let left = self.explicit[2 * pair_index];
-            let right = self
-                .explicit
-                .get(2 * pair_index + 1)
-                .copied()
-                .unwrap_or(default);
-            self.explicit[pair_index] = fold_pair(left, right);
-        }
-
-        let mut wave_start = sequential_len;
-        while wave_start < next_explicit_len {
-            // Pair i writes i and reads 2i..=2i+1. Once [0, a) is folded,
-            // [a, 2a) has disjoint inputs and may run in parallel.
-            let wave_end = (2 * wave_start).min(next_explicit_len);
-            let source_start = 2 * wave_start;
-            let (output_prefix, source_suffix) = self.explicit.split_at_mut(source_start);
-            let output = &mut output_prefix[wave_start..wave_end];
-            let source_len = (2 * output.len()).min(explicit_len - source_start);
-            let source = &source_suffix[..source_len];
-            cfg_iter_mut!(output)
-                .enumerate()
-                .for_each(|(pair_index, folded)| {
-                    let left = source[2 * pair_index];
-                    let right = source.get(2 * pair_index + 1).copied().unwrap_or(default);
-                    *folded = fold_pair(left, right);
-                });
-            wave_start = wave_end;
+        const CHUNK: usize = 2048;
+        if next_explicit_len <= EXACT_PREFIX_SEQUENTIAL_LEN {
+            for i in 0..next_explicit_len {
+                self.explicit[i] = fold_pair(
+                    self.explicit[2 * i],
+                    self.explicit.get(2 * i + 1).copied().unwrap_or(default),
+                );
+            }
+        } else {
+            cfg_chunks_mut!(self.explicit, 2 * CHUNK).for_each(|chunk| {
+                for i in 0..chunk.len().div_ceil(2) {
+                    chunk[i] = fold_pair(
+                        chunk[2 * i],
+                        chunk.get(2 * i + 1).copied().unwrap_or(default),
+                    );
+                }
+            });
+            for src in (2 * CHUNK..explicit_len).step_by(2 * CHUNK) {
+                let len = CHUNK.min((explicit_len - src).div_ceil(2));
+                self.explicit.copy_within(src..src + len, src / 2);
+            }
         }
 
         self.default = fold_pair(self.default, self.default);

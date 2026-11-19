@@ -88,6 +88,7 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
             };
         Ok(Self {
             range_image,
+            zero_pages: Vec::new(),
             split_eq,
             range_poly,
             live_x_cols,

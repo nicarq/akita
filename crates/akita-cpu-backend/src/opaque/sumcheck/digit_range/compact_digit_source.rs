@@ -90,9 +90,32 @@ impl CompactDigitSource {
     }
 
     fn ordered_range_class_pairs(digits: &PackedSignedDigits, class_count: u8) -> Arc<[u16]> {
+        if digits.bit_width() == 4 && class_count == 8 {
+            let bytes = digits.encoded_bytes();
+            let pairs = digits.len().div_ceil(2);
+            let even = digits.len().is_multiple_of(2);
+            return bytes
+                .iter()
+                .take(pairs)
+                .enumerate()
+                .map(|(index, &packed)| {
+                    let signs = ((packed >> 3) & 0x11) * 7;
+                    let classes = packed ^ signs;
+                    let left = (classes & 7) as u16;
+                    let right = if even || index + 1 < pairs {
+                        (classes >> 4) & 7
+                    } else {
+                        0
+                    };
+                    left * 8 + u16::from(right)
+                })
+                .collect();
+        }
+        let pairs = digits.len().div_ceil(2);
         let mut digits = digits.iter();
-        std::iter::from_fn(|| {
-            digits.next().map(|digit| {
+        (0..pairs)
+            .map(|_| {
+                let digit = digits.next().expect("each pair has a left digit");
                 let left = RangeImageClass::from_balanced_digit(digit, usize::from(class_count)).0;
                 let right = digits
                     .next()
@@ -105,8 +128,7 @@ impl CompactDigitSource {
                 // count, 127 * 255 + 127 fits u16.
                 u16::from(left) * u16::from(class_count) + u16::from(right)
             })
-        })
-        .collect()
+            .collect()
     }
 
     pub(super) fn digits(&self) -> PackedSignedDigits {

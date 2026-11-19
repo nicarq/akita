@@ -173,6 +173,7 @@ pub struct LowBasisRangeCheckProver<E: Field> {
     col_bits: usize,
     num_vars: usize,
     basis: usize,
+    zero_pages: Vec<u8>,
     cached_round_poly: Option<OmittedConstantPoly<E>>,
     rounds_completed: usize,
 }
@@ -185,6 +186,9 @@ mod state;
 
 #[cfg(test)]
 mod kernel_tests;
+#[cfg(test)]
+#[path = "direct_range_leaf/tests/page_boundaries.rs"]
+mod page_boundary_tests;
 #[cfg(test)]
 mod reference_tests;
 #[cfg(test)]

@@ -132,10 +132,12 @@ impl<E: Field + Ring + Unreduced + Fold> LowBasisRangeCheckProver<E> {
         let fuse_next_live_prefix =
             current == RoundKernel::LivePrefix && next == RoundKernel::LivePrefix;
         if fuse_next_live_prefix {
+            let ctx = E::precompute(r);
+            let ctx = &ctx;
             let range_image = range_image.as_slice();
             let (next_range_image, round_poly) = self
                 .fuse_live_prefix_and_compute_round(range_image.len().div_ceil(2), |_| {
-                    move |entry| fold_prefix_pair_with_zero_padding(range_image, 2 * entry, r)
+                    move |entry| fold_prefix_pair_with_zero_padding(range_image, 2 * entry, ctx)
                 });
             self.cached_round_poly = Some(round_poly);
             next_range_image

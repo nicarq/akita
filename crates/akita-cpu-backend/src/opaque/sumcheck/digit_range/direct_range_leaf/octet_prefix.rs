@@ -227,18 +227,23 @@ fn use_constant_octet_pairs(classes: &[u16]) -> bool {
 pub(super) struct JointOctetWeights<E> {
     weights: [E; 256],
     covered_tiles: Vec<bool>,
+    zero_pages: Vec<u8>,
 }
 
 impl<E> JointOctetWeights<E> {
     fn covered(&self, pair: usize) -> bool {
-        self.covered_tiles[pair / HISTOGRAM_TILE_PAIRS]
+        self.covered_tiles
+            .get(pair / HISTOGRAM_TILE_PAIRS)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn covers(&self, pairs: Range<usize>) -> bool {
-        self.covered_tiles
-            [pairs.start / HISTOGRAM_TILE_PAIRS..=(pairs.end - 1) / HISTOGRAM_TILE_PAIRS]
-            .iter()
-            .all(|&covered| covered)
+        !self.covered_tiles.is_empty()
+            && self.covered_tiles
+                [pairs.start / HISTOGRAM_TILE_PAIRS..=(pairs.end - 1) / HISTOGRAM_TILE_PAIRS]
+                .iter()
+                .all(|&covered| covered)
     }
 }
 
@@ -327,12 +332,26 @@ fn octet_pair_class_weights<E: Field>(
             let mut joint = JointOctetWeights {
                 weights: [E::zero(); 256],
                 covered_tiles: Vec::new(),
+                zero_pages: Vec::new(),
             };
             for tile in tiles {
                 let start = tile * HISTOGRAM_TILE_PAIRS;
                 let end = (start + HISTOGRAM_TILE_PAIRS).min(live_pairs);
                 let classes = reader.classes(2 * start..2 * end);
                 let pairs = classes.as_chunks::<2>().0;
+                let mut zero_bits = 0_u8;
+                for (page, chunk) in classes.chunks(512).enumerate() {
+                    if chunk.iter().all(|&class| class == 0) {
+                        zero_bits |= 1 << page;
+                    }
+                }
+                joint.zero_pages.push(zero_bits);
+                if zero_bits == u8::MAX {
+                    if can_use_joint {
+                        joint.covered_tiles.push(true);
+                    }
+                    continue;
+                }
                 let covered = can_use_joint
                     && use_constant_octet_pairs(&classes)
                     && pairs
@@ -379,13 +398,20 @@ fn octet_pair_class_weights<E: Field>(
     let (totals, mut initial) = tables.remove(0);
     for (_, mut task) in tables {
         initial.covered_tiles.append(&mut task.covered_tiles);
+        initial.zero_pages.append(&mut task.zero_pages);
         add_assign_all(&mut initial.weights, &task.weights);
     }
-    let joint = initial
-        .covered_tiles
+    let zero_count: usize = initial
+        .zero_pages
         .iter()
-        .any(|&covered| covered)
-        .then(|| Box::new(initial));
+        .map(|v| v.count_ones() as usize)
+        .sum();
+    if zero_count * 2 < initial.zero_pages.len() {
+        initial.zero_pages = Vec::new();
+    }
+    let joint = (!initial.zero_pages.is_empty()
+        || initial.covered_tiles.iter().any(|&covered| covered))
+    .then(|| Box::new(initial));
     (totals, joint)
 }
 
@@ -638,7 +664,10 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
         &mut self,
         prefix: OctetPrefix<E>,
         r: E,
-    ) -> LowBasisRangeImageStorage<E> {
+    ) -> LowBasisRangeImageStorage<E>
+    where
+        E: Fold,
+    {
         let OctetPrefix {
             digits: source,
             width,
@@ -668,7 +697,16 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
                 octet_pair_class_weights: weights.octet_pair_class_weights,
                 compact_pairs: weights.compact_pairs,
             },
-            DirectRangePrefixState::Round3 { octet_terms, .. } => {
+            DirectRangePrefixState::Round3 {
+                octet_terms,
+                compact_pairs,
+                ..
+            } => {
+                if let Some(compact) = compact_pairs {
+                    self.zero_pages = compact.zero_pages;
+                }
+                let ctx = E::precompute(r);
+                let ctx = &ctx;
                 let terms = octet_terms.as_slice();
                 let next_live = source.len().div_ceil(8).div_ceil(2);
                 let reader = OctetClassReader::new(&source, class_bits, width);
@@ -676,7 +714,7 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
                     std::array::from_fn::<_, 256, _>(|code| {
                         let left = terms[expand_constant_octet(code & 15)].value;
                         let right = terms[expand_constant_octet(code >> 4)].value;
-                        left + r * (right - left)
+                        E::fold_one(ctx, left, right)
                     })
                 });
                 let folds_for_tile = |entries: Range<usize>| {
@@ -698,7 +736,7 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
                         if lo == hi {
                             left
                         } else {
-                            left + r * (terms[usize::from(hi)].value - left)
+                            E::fold_one(ctx, left, terms[usize::from(hi)].value)
                         }
                     }
                 };

@@ -205,7 +205,7 @@ where
             {
                 if let Some(coordinates) = packing.contract::<F, E, D>(
                     RootPolyMeta::<F>::num_vars(*poly),
-                    live_coeff_len,
+                    &poly.field_coeffs()[..live_coeff_len],
                     fused_weights,
                 )? {
                     return SubringCoefficientPackingPartials::new(

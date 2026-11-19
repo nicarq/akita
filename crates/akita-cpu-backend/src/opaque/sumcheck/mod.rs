@@ -123,10 +123,14 @@ pub(crate) fn single_row_tile_pairs(block_size: usize) -> usize {
 /// Fold adjacent evaluations in a live-prefix row at a challenge `r`, treating
 /// indices past the materialized prefix as implicit zero-padding.
 #[inline]
-pub(crate) fn fold_prefix_pair_with_zero_padding<E: Field>(row: &[E], left: usize, r: E) -> E {
+pub(crate) fn fold_prefix_pair_with_zero_padding<E: Field + jolt_field::Fold>(
+    row: &[E],
+    left: usize,
+    ctx: &E::Ctx,
+) -> E {
     let v0 = row.get(left).copied().unwrap_or_else(E::zero);
     let v1 = row.get(left + 1).copied().unwrap_or_else(E::zero);
-    v0 + r * (v1 - v0)
+    E::fold_one(ctx, v0, v1)
 }
 
 pub(crate) mod setup_batch;

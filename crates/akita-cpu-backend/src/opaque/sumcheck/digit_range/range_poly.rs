@@ -9,14 +9,14 @@ use jolt_poly::OmittedConstantPoly;
 /// computes it.
 pub(crate) const MAX_DIRECT_RANGE_COEFFICIENTS: usize = 4;
 
-/// What the first of a round's per-pair sums holds; every later sum is a
-/// Taylor term divided by its integer factor.
+/// Encoding of the accumulated sums before reconstruction of the round polynomial.
 #[derive(Clone, Copy)]
 pub(crate) enum LinearSum {
     /// The linear Taylor term, divided by its factor like the others.
     Taylor,
-    /// `Q(right) - Q(left)`, the sum of all nonconstant coefficients, which
-    /// table-driven rounds read without computing the linear term.
+    /// The first sum is `Q(right) - Q(left)`. In a quartic the other sums
+    /// weight `delta²` by the left and right centered squares minus seven,
+    /// and then by `delta²` itself.
     RangeDifference,
 }
 
@@ -62,6 +62,17 @@ impl RangePoly {
         sums: &TaylorSums<E>,
         linear: LinearSum,
     ) -> OmittedConstantPoly<E> {
+        if matches!((self, linear), (Self::Quartic, LinearSum::RangeDifference)) {
+            let [difference, left, right, fourth] = sums.map(E::reduce_product);
+            let second = E::from_u64(6) * left;
+            let third = E::from_u64(2) * (right - left - fourth);
+            return OmittedConstantPoly::new(vec![
+                difference - second - third - fourth,
+                second,
+                third,
+                fourth,
+            ]);
+        }
         let mut coefficients: Vec<E> = sums
             .iter()
             .zip(self.taylor_factors())
@@ -89,7 +100,6 @@ pub(crate) type TaylorSums<E> = [<E as Unreduced>::Product; MAX_DIRECT_RANGE_COE
 #[derive(Clone, Copy)]
 pub(crate) struct OctetClassTerms<E> {
     pub(crate) value: E,
-    shifted: E,
     /// `shifted^2 - 7`.
     second: E,
 }
@@ -117,7 +127,6 @@ impl RangePoly {
         let shifted = value - E::from_u64(5);
         OctetClassTerms {
             value,
-            shifted,
             second: shifted.square() - E::from_u64(7),
         }
     }
@@ -177,7 +186,7 @@ impl RangePoly {
         } else {
             let weighted_delta_squared = weight * delta_squared;
             sums[1] += left.second.mul_unreduced(weighted_delta_squared);
-            sums[2] += (left.shifted * delta).mul_unreduced(weighted_delta_squared);
+            sums[2] += right.second.mul_unreduced(weighted_delta_squared);
             sums[3] += delta_squared.mul_unreduced(weighted_delta_squared);
         }
     }

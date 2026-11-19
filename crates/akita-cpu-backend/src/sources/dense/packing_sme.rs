@@ -15,10 +15,19 @@ const STRIDE: usize = 16;
 const STRIPE: usize = 16;
 const OUTPUT: usize = 2 * (RING_D / STRIDE);
 const MAX_WORDS: usize = 1 << 30;
+const MAX_UNCACHED_WORDS: usize = 3 << 26;
+
+type BlockKernel = unsafe extern "C" fn(*const u64, *const u64, usize, *mut u64) -> std::ffi::c_int;
 
 unsafe extern "C" {
     fn akita_packing_sme_available() -> std::ffi::c_int;
     fn akita_packing_sme_striped(
+        source: *const u64,
+        weights: *const u64,
+        terms: usize,
+        output: *mut u64,
+    ) -> std::ffi::c_int;
+    fn akita_packing_sme_source(
         source: *const u64,
         weights: *const u64,
         terms: usize,
@@ -34,6 +43,7 @@ fn available() -> bool {
 
 pub(super) struct PackingStripes {
     positions: usize,
+    source_words: usize,
     words: Vec<u64>,
 }
 
@@ -56,9 +66,11 @@ impl PackingStripes {
             .checked_mul(RING_D)
             .filter(|&n| n <= MAX_WORDS)?;
         let block_len = positions * RING_D;
+        let uncached_blocks = (len / block_len / 3).min(MAX_UNCACHED_WORDS / block_len);
+        let cached_len = len - uncached_blocks * block_len;
         let mut words = Vec::new();
-        words.try_reserve_exact(len).ok()?;
-        words.resize(len, 0);
+        words.try_reserve_exact(cached_len).ok()?;
+        words.resize(cached_len, 0);
         let complete = cfg_chunks_mut!(words, block_len)
             .enumerate()
             .all(|(block, out)| {
@@ -82,13 +94,17 @@ impl PackingStripes {
                 }
                 true
             });
-        complete.then_some(Self { positions, words })
+        complete.then_some(Self {
+            positions,
+            source_words: len,
+            words,
+        })
     }
 
     pub(super) fn contract<F, E, const D: usize>(
         &self,
         source_vars: usize,
-        source_coeff_len: usize,
+        source: &[F],
         weights: &FusedPackingWeights<'_, E>,
     ) -> Result<Option<Vec<F>>, AkitaError>
     where
@@ -98,7 +114,7 @@ impl PackingStripes {
         let tables = weights.tables();
         let point = tables.point();
         let geometry = point.geometry();
-        let full_positions = self.words.len() / RING_D;
+        let full_positions = self.source_words / RING_D;
         if D != RING_D
             || F::CHALLENGE_SET_LIMBS != [Q, 0, 0, 0]
             || E::DEGREE != 2
@@ -106,7 +122,7 @@ impl PackingStripes {
             || geometry.subring_embedding_stride() != STRIDE
             || geometry.partial_base_field_width() != OUTPUT
             || point.num_positions_per_block() != self.positions
-            || source_coeff_len != self.words.len()
+            || source.len() != self.source_words
             || point.num_live_positions() < full_positions
             || weights.values().len() != self.positions * STRIDE
         {
@@ -137,6 +153,9 @@ impl PackingStripes {
             };
             canonical_weights.push([real, imaginary]);
         }
+        let Some(raw) = F::canonical_u64_slice(source) else {
+            return Ok(None);
+        };
         let mut out = Vec::new();
         out.try_reserve_exact(len).map_err(|_| {
             AkitaError::InvalidInput("coefficient-packing output allocation failed".into())
@@ -148,12 +167,16 @@ impl PackingStripes {
                 .enumerate()
                 .all(|(block, output)| {
                     let mut partial = [0u64; OUTPUT];
-                    let words = &self.words[block * words_per_block..][..words_per_block];
-                    // SAFETY: The constructor checks SME support and lays out full
-                    // blocks. The weights contain one pair per position and residue.
-                    // Each call has its own fixed-size output.
+                    let range = block * words_per_block..(block + 1) * words_per_block;
+                    let (words, contract): (&[u64], BlockKernel) =
+                        match self.words.get(range.clone()) {
+                            Some(packed) => (packed, akita_packing_sme_striped),
+                            None => (&raw[range], akita_packing_sme_source),
+                        };
+                    // SAFETY: Both kernels read one full block and its weight pairs
+                    // and write OUTPUT words. Construction checks SME support.
                     let ok = unsafe {
-                        akita_packing_sme_striped(
+                        contract(
                             words.as_ptr(),
                             canonical_weights.as_ptr().cast(),
                             self.positions * STRIDE,

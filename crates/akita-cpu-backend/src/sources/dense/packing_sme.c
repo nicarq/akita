@@ -67,6 +67,72 @@ int akita_packing_sme_striped(const uint64_t *source, const uint64_t *weights,
     return 1;
 }
 
+#define ACCUMULATE_COLUMN(source_tile, input_row, weight) do { \
+    svuint64_t raw = svread_ver_za64_u64_m(svdup_u64(0), all, source_tile, input_row); \
+    svuint16_t source = svreinterpret_u16_u64(raw); \
+    svuint16_t packed = svreinterpret_u16_u64(svld1rq_u64(all, weight)); \
+    svuint16_t real = svtbl_u16(packed, real_indices); \
+    svuint16_t imaginary = svtbl_u16(packed, imaginary_indices); \
+    svmopa_za64_u16_m(0, digits, digits, real, source); \
+    svmopa_za64_u16_m(1, digits, digits, imaginary, source); \
+} while (0)
+
+__arm_locally_streaming __arm_new("za")
+int akita_packing_sme_source(const uint64_t *source, const uint64_t *weights,
+                             size_t terms, uint64_t *output) {
+    const size_t stride = 16;
+    const size_t panel = 16;
+    const size_t lanes = 8;
+    const size_t d = 2048;
+    const size_t positions = terms / stride;
+    if (svcntd() != lanes || terms == 0 || terms > 16 * 1024 || terms % stride != 0)
+        return 0;
+    uint64_t scratch[128 * 14];
+    svbool_t all = svptrue_b64();
+    svbool_t digits = svptrue_b16();
+    svuint16_t real_indices = svld1_u16(digits, packing_indices[0]);
+    svuint16_t imaginary_indices = svld1_u16(digits, packing_indices[1]);
+    const size_t subring = d / stride;
+    for (size_t first = 0; first < positions; first += panel) {
+        const size_t end = positions - first < panel ? positions : first + panel;
+        for (size_t j = 0; j < subring; j += lanes) {
+            uint64_t *saved = scratch + j * 14;
+            svzero_za();
+            if (first != 0) {
+                for (uint32_t k = 0; k < 7; k++) {
+                    svld1_hor_za64(0, k, all, saved + lanes * k);
+                    svld1_hor_za64(1, k, all, saved + lanes * (k + 7));
+                }
+            }
+            for (size_t position = first; position < end; position++) {
+                const uint64_t *row = source + position * d + j * stride;
+                for (uint32_t k = 0; k < lanes; k++, row += stride) {
+                    svwrite_hor_za64_u64_m(6, k, all, svld1_u64(all, row));
+                    svwrite_hor_za64_u64_m(7, k, all, svld1_u64(all, row + lanes));
+                }
+                const uint64_t *by_position = weights + position * stride * 2;
+                for (uint32_t k = 0; k < lanes; k++, by_position += 2) {
+                    ACCUMULATE_COLUMN(6, k, by_position);
+                    ACCUMULATE_COLUMN(7, k, by_position + lanes * 2);
+                }
+            }
+            if (end != positions) {
+                for (uint32_t k = 0; k < 7; k++) {
+                    svst1_hor_za64(0, k, all, saved + lanes * k);
+                    svst1_hor_za64(1, k, all, saved + lanes * (k + 7));
+                }
+            } else {
+                svuint64_t real, imaginary;
+                MERGE(0, real);
+                MERGE(1, imaginary);
+                svst1_u64(all, output + j, real);
+                svst1_u64(all, output + subring + j, imaginary);
+            }
+        }
+    }
+    return 1;
+}
+
 __arm_locally_streaming
 static int full_streaming_length(void) {
     return svcntd() == 8;
