@@ -115,6 +115,7 @@ fn new_stage2_test_prover(
             1usize << params.coefficient_bits,
         ),
         None,
+        false,
     )
     .unwrap()
 }
@@ -175,6 +176,7 @@ pub(super) fn new_stage2_test_prover_with_linear_terms(
         direct.relation + direct.evaluation_trace,
         linear_terms,
         None,
+        false,
     )
     .unwrap()
 }

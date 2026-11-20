@@ -168,6 +168,17 @@ pub(crate) struct DigitRangeSession<E: Field> {
 }
 
 impl<E: Field + Ring + Fold + Unreduced + 'static> DigitRangeSession<E> {
+    #[cfg(akita_fold_metal)]
+    pub(crate) fn enable_metal_kernels(&mut self) {
+        if std::any::TypeId::of::<E>()
+            == std::any::TypeId::of::<jolt_field::Ext2<jolt_field::Prime64Offset59>>()
+        {
+            if let Some(ActiveStage::Low(prover)) = &mut self.active {
+                prover.metal_kernels = true;
+            }
+        }
+    }
+
     pub(crate) fn new(
         prover: DigitRangeProver<E>,
         physical: Option<akita_types::PhysicalResponsePlan>,

@@ -66,7 +66,7 @@ where
     let batch = <crate::DensePoly<F> as RootOpeningSource<F, D>>::opening_batch(&refs)?;
     let weights = crate::arithmetic::coefficient_packing::FusedPackingWeights::new(tables)?;
     std::hint::black_box(crate::sources::dense::dense_coefficient_packing_partials(
-        batch, &weights,
+        batch, &weights, false,
     )?);
     Ok(())
 }

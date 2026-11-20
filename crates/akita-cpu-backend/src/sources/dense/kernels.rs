@@ -84,6 +84,7 @@ where
             plan.num_positions_per_block,
             plan.num_digits,
             plan.log_basis,
+            self.metal_kernels,
         )
     }
 }
@@ -134,6 +135,7 @@ where
                                 num_positions_per_block,
                                 num_digits,
                                 log_basis,
+                                self.metal_kernels,
                             )
                         }),
                 )?,
@@ -158,6 +160,7 @@ where
                             num_positions_per_block,
                             num_digits,
                             log_basis,
+                            self.metal_kernels,
                         )?)
                     {
                         chunk.push(Ok(witness));
@@ -177,6 +180,7 @@ where
 pub(crate) fn dense_coefficient_packing_partials<F, E, const D: usize>(
     source: DenseBatchView<'_, F, D>,
     fused_weights: &FusedPackingWeights<'_, E>,
+    _metal_kernels: bool,
 ) -> Result<Vec<SubringCoefficientPackingPartials<F>>, AkitaError>
 where
     F: Field + CanonicalEncoding,
@@ -197,7 +201,7 @@ where
                 });
             }
             let live_coeff_len = poly.nonzero_coeff_len();
-            #[cfg(akita_packing_sme)]
+            #[cfg(any(akita_packing_sme, akita_fold_metal))]
             if let Some(packing) = poly
                 .fixed_fold_ntt
                 .as_ref()
@@ -207,6 +211,11 @@ where
                     RootPolyMeta::<F>::num_vars(*poly),
                     &poly.field_coeffs()[..live_coeff_len],
                     fused_weights,
+                    if _metal_kernels {
+                        poly.shared_words()
+                    } else {
+                        None
+                    },
                 )? {
                     return SubringCoefficientPackingPartials::new(
                         point.geometry(),
@@ -296,6 +305,6 @@ where
         plan: SubringCoefficientPackingPlan<'_, E>,
     ) -> Result<Vec<SubringCoefficientPackingPartials<F>>, AkitaError> {
         let fused_weights = FusedPackingWeights::new(plan.tables)?;
-        dense_coefficient_packing_partials(source, &fused_weights)
+        dense_coefficient_packing_partials(source, &fused_weights, self.metal_kernels)
     }
 }

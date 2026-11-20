@@ -272,32 +272,50 @@ impl<F: Field, E> CpuBackend<F, E> {
         let source = RunDigits::<F, D>::new(poly, shape)?;
 
         let mut distinct = Vec::new();
+        let mut uniform = Vec::new();
         let mut constants = BTreeMap::new();
         let mut block_indices = Vec::with_capacity(block_ranges.len());
         for (index, rings) in block_ranges.into_iter().enumerate() {
-            let constant = poly
-                .constant_value(rings.start * D..rings.end * D)
-                .and_then(|value| value.to_u128_checked());
-            let representative = match constant {
+            let constant = poly.constant_value(rings.start * D..rings.end * D);
+            let representative = match constant.and_then(|value| value.to_u128_checked()) {
                 Some(value) => *constants.entry((value, rings.len())).or_insert(index),
                 None => index,
             };
             block_indices.push(representative);
             if representative == index {
+                uniform.extend(constant.filter(|value| {
+                    value.is_zero() || rings.len() == row_width / shape.num_digits
+                }));
                 distinct.push(rings);
             }
         }
-        let rows = self.commit_rows(
-            prepared,
-            plan.n_a,
-            row_width,
-            &source,
-            &distinct,
-            shape,
-            kernel,
-            false,
-            I8CommitPolicy::Dense,
-        )?;
+        #[cfg(akita_fold_metal)]
+        let device_rows = if self.metal_kernels && uniform.len() < distinct.len() {
+            super::metal_lookup::commit(prepared, poly, &distinct, &plan, row_width)?
+        } else {
+            None
+        };
+        #[cfg(not(akita_fold_metal))]
+        let device_rows = None;
+        let rows = if let Some(rows) = device_rows {
+            rows
+        } else if kernel == SignedDigitKernel::I16 && uniform.len() == distinct.len() {
+            super::matrix_columns::commit_constant_blocks(
+                prepared, plan.n_a, row_width, shape, &uniform,
+            )?
+        } else {
+            self.commit_rows(
+                prepared,
+                plan.n_a,
+                row_width,
+                &source,
+                &distinct,
+                shape,
+                kernel,
+                false,
+                I8CommitPolicy::Dense,
+            )?
+        };
         if rows.len() == block_indices.len() {
             return Ok(rows);
         }
@@ -473,6 +491,38 @@ impl<F: Field, E> CpuBackend<F, E> {
             log_basis: log_basis_inner,
         };
         if num_digits_inner == 1 {
+            #[cfg(akita_fold_metal)]
+            if self.metal_kernels
+                && n_rows == 2
+                && signed_digit_kernel == SignedDigitKernel::I8
+                && digits.bounds().fits_balanced_log_basis(log_basis_inner)
+                && D == 512
+                && row_width == 2048
+            {
+                let key = NttCacheKey::from_matrix_shape(
+                    D,
+                    n_rows,
+                    row_width,
+                    NttTransformDomain::Negacyclic,
+                )?;
+                if let Some(rows) = prepared.with_shared_ntt::<D, _>(key, |slot| {
+                    Ok(super::metal_packed::commit(
+                        slot,
+                        digits,
+                        row_width,
+                        num_live_blocks,
+                    ))
+                })? {
+                    tracing::debug!(
+                        blocks = num_live_blocks,
+                        rows = n_rows,
+                        cols = row_width,
+                        ring_degree = D,
+                        "completed Metal packed recursive commitment"
+                    );
+                    return Ok(rows);
+                }
+            }
             let policy = I8CommitPolicy::Recursive {
                 raw: !digits.bounds().fits_balanced_log_basis(log_basis_inner),
             };
@@ -520,3 +570,7 @@ fn dense_i8_exact_ifma52_preferred<F: Field + CanonicalEncoding, const D: usize>
         rhs_abs_bound,
     ))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/constant_block_commit.rs"]
+mod constant_block_tests;

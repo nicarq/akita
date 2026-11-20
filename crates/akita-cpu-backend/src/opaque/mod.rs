@@ -429,7 +429,17 @@ where
         }
         let binding = self.next_binding(parent)?;
         let lease = binding.scope_lease().clone();
-        crate::opaque::CpuStage1SessionHandle::new(binding, lease, relation_handle, plan)
+        let session =
+            crate::opaque::CpuStage1SessionHandle::new(binding, lease, relation_handle, plan)?;
+        #[cfg(akita_fold_metal)]
+        let session = {
+            let mut session = session;
+            if self.metal_kernels {
+                session.session_state.enable_metal_kernels();
+            }
+            session
+        };
+        Ok(session)
     }
 
     fn stage1_round_polynomial(
@@ -568,6 +578,7 @@ where
             self.prepared()?,
             relation_handle,
             plan,
+            self.metal_kernels,
         )?;
         let binding = self.next_binding(parent)?;
         let lease = binding.scope_lease().clone();

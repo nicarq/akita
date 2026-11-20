@@ -148,6 +148,32 @@ impl<F: Field> DensePoly<F> {
         }
     }
 
+    #[cfg(any(akita_packing_sme, akita_fold_metal))]
+    pub(super) fn shared_words(&self) -> Option<&Arc<Vec<u64>>> {
+        match &self.coeffs {
+            DenseCoefficients::SharedCanonicalWords { words, .. } => Some(words),
+            _ => None,
+        }
+    }
+
+    /// Contract equal-length rows of this prepared canonical P64 source with two weights per row.
+    /// Returns canonical coordinate pairs when the shared Metal packing key is available.
+    pub fn metal_weighted_rows(&self, weights: &[[u64; 2]]) -> Option<Vec<[u64; 2]>> {
+        #[cfg(akita_fold_metal)]
+        {
+            self.fixed_fold_ntt
+                .as_ref()?
+                .packing
+                .as_ref()?
+                .weighted_rows(self.shared_words()?, weights)
+        }
+        #[cfg(not(akita_fold_metal))]
+        {
+            let _ = weights;
+            None
+        }
+    }
+
     pub(crate) const fn nonzero_coeff_len(&self) -> usize {
         self.nonzero_coeff_len
     }

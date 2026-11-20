@@ -160,6 +160,7 @@ fn check_configuration(coefficient_bits: usize, live_lanes: usize, mode: WeightM
         relation_claim + direct.evaluation_trace + additional_claim,
         structured,
         additional,
+        false,
     )
     .unwrap();
     if matches!(mode, WeightMode::Disabled) {
@@ -366,6 +367,7 @@ fn check_response_norm_source(basis: usize, with_trace: bool, wide_digits: bool)
         base_relation_claim + linear_claim,
         linear_terms,
         None,
+        false,
     )
     .unwrap();
 

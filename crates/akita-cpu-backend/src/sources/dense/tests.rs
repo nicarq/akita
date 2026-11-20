@@ -73,13 +73,13 @@ fn chunked_fold_matches_windowed_reference_and_global() {
         })
         .collect::<Vec<_>>();
     let global = poly
-        .decompose_fold::<D>(&challenges, POSITIONS, 2, 4)
+        .decompose_fold::<D>(&challenges, POSITIONS, 2, 4, false)
         .unwrap();
 
     for chunk_count in [2, 4, 8] {
         let ranges = akita_params::dyadic_block_ranges(challenges.len(), chunk_count).unwrap();
         let chunks = poly
-            .decompose_fold_chunked::<D>(&challenges, &ranges, POSITIONS, 2, 4)
+            .decompose_fold_chunked::<D>(&challenges, &ranges, POSITIONS, 2, 4, false)
             .unwrap();
         assert_eq!(chunks.len(), chunk_count);
         for (range, chunk) in ranges.iter().zip(&chunks) {
@@ -97,7 +97,9 @@ fn chunked_fold_matches_windowed_reference_and_global() {
                     }
                 })
                 .collect::<Vec<_>>();
-            let expected = poly.decompose_fold::<D>(&window, POSITIONS, 2, 4).unwrap();
+            let expected = poly
+                .decompose_fold::<D>(&window, POSITIONS, 2, 4, false)
+                .unwrap();
             assert_eq!(
                 chunk.centered_coeffs_flat(),
                 expected.centered_coeffs_flat()
@@ -384,7 +386,8 @@ fn fold_rejects_unsupported_digit_shapes_with_cold_and_populated_caches() {
                         &[0..1, 1..2],
                         1,
                         num_digits,
-                        log_basis
+                        log_basis,
+                        false
                     ),
                     Err(AkitaError::InvalidInput(_))
                 ),
@@ -416,7 +419,7 @@ fn single_digit_fold_preserves_signed_i8_i16_boundaries() {
             coefficients[0] = Prime64Offset59::from_i64(value);
             let poly = DensePoly::from_field_evals(7, coefficients).unwrap();
             let actual = poly
-                .decompose_fold::<D>(std::slice::from_ref(&challenge), 1, 1, log_basis)
+                .decompose_fold::<D>(std::slice::from_ref(&challenge), 1, 1, log_basis, false)
                 .unwrap();
             let mut expected = vec![0_i32; D];
             expected[0] = value as i32;
@@ -443,11 +446,11 @@ fn fold_operations_reject_invalid_ring_views() {
         Err(AkitaError::InvalidInput(_))
     ));
     assert!(matches!(
-        poly.decompose_fold::<0>(&[], 1, 1, 1),
+        poly.decompose_fold::<0>(&[], 1, 1, 1, false),
         Err(AkitaError::InvalidInput(_))
     ));
     assert!(matches!(
-        poly.decompose_fold_chunked::<0>(&[], &[], 1, 1, 1),
+        poly.decompose_fold_chunked::<0>(&[], &[], 1, 1, 1, false),
         Err(AkitaError::InvalidInput(_))
     ));
 }
@@ -466,7 +469,7 @@ fn single_digit_fold_validates_challenges_before_both_dense_row_loops() {
             coeffs: vec![1].into(),
         }];
         assert_eq!(
-            poly.decompose_fold::<128>(&challenges, 1, 1, 4)
+            poly.decompose_fold::<128>(&challenges, 1, 1, 4, false)
                 .unwrap_err(),
             AkitaError::InvalidInput(
                 "sparse fold challenge position exceeds the ring dimension".into()
@@ -490,17 +493,17 @@ fn dense_single_digit_fold_preserves_unused_challenges_and_empty_positions() {
         coeffs: vec![1].into(),
     };
     let expected = poly
-        .decompose_fold::<128>(std::slice::from_ref(&valid), 1, 1, 4)
+        .decompose_fold::<128>(std::slice::from_ref(&valid), 1, 1, 4, false)
         .unwrap();
     let actual = poly
-        .decompose_fold::<128>(&[valid, invalid.clone()], 1, 1, 4)
+        .decompose_fold::<128>(&[valid, invalid.clone()], 1, 1, 4, false)
         .unwrap();
     assert_eq!(
         actual.centered_coeffs_flat(),
         expected.centered_coeffs_flat()
     );
     assert!(poly
-        .decompose_fold::<128>(&[invalid], 0, 1, 4)
+        .decompose_fold::<128>(&[invalid], 0, 1, 4, false)
         .unwrap()
         .centered_coeffs_flat()
         .is_empty());
@@ -703,7 +706,7 @@ fn zero_suffix_decomposition_keeps_position_and_block_alignment() {
             DensePoly::<F>::from_field_evals(9, values).unwrap(),
         ] {
             let folded = poly
-                .decompose_fold::<D>(&challenges, POSITIONS, 1, 4)
+                .decompose_fold::<D>(&challenges, POSITIONS, 1, 4, false)
                 .unwrap();
             assert_eq!(folded.centered_coeffs_flat(), expected);
         }

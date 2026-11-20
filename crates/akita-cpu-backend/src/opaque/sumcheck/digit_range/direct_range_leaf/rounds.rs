@@ -21,6 +21,8 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
             LowBasisRangeImageStorage::Materialized(Vec::new()),
         );
         let poly = match (&mut storage, kernel) {
+            #[cfg(akita_fold_metal)]
+            (LowBasisRangeImageStorage::Metal(prover), _) => prover.polynomial.clone(),
             (LowBasisRangeImageStorage::OctetPrefix(prefix), _) => {
                 self.compute_octet_prefix_round(&*prefix)
             }
@@ -94,6 +96,11 @@ impl<E: Field + Ring + Unreduced + Fold> EqFactoredSumcheckInstanceProver<E>
             LowBasisRangeImageStorage::Materialized(Vec::new()),
         );
         self.range_image = match storage {
+            #[cfg(akita_fold_metal)]
+            LowBasisRangeImageStorage::Metal(prover) => {
+                self.split_eq.bind(r);
+                prover.bind(round + 1, r, &self.split_eq, &mut self.cached_round_poly)
+            }
             LowBasisRangeImageStorage::OctetPrefix(prefix) => {
                 self.ingest_octet_prefix_challenge(prefix, r)
             }

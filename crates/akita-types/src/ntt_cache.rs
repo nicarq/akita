@@ -556,6 +556,20 @@ impl<'a, W: PrimeWidth, const K: usize, const D: usize> PreparedNttBaseView<'a, 
     }
 }
 
+/// Read-only i32 limb rows of a prepared exact signed-i16 commitment matrix.
+pub struct PreparedI32LimbView<'a, const D: usize> {
+    /// Row-major spectra ordered by matrix row, balanced limb and input column.
+    pub spectra: &'a [CyclotomicCrtNtt<i32, 2, D>],
+    /// CRT and transform parameters used to prepare these spectra.
+    pub params: &'a CrtNttParamSet<i32, 2, D>,
+    /// Number of balanced limbs per matrix element.
+    pub limbs: usize,
+    /// Radix exponent of each limb.
+    pub limb_bits: u32,
+    /// Number of input rings per matrix row.
+    pub width: usize,
+}
+
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum PreparedNttCacheRepr<const D: usize> {
@@ -909,6 +923,14 @@ impl<const D: usize> PreparedNttCacheRepr<D> {
 }
 
 impl<const D: usize> PreparedNttCache<D> {
+    /// Borrow the prepared two-prime limb representation, when selected.
+    pub fn i32_limb_view(&self) -> Option<PreparedI32LimbView<'_, D>> {
+        match &self.0 {
+            PreparedNttCacheRepr::Limbs(matrix) => matrix.i32_view(),
+            _ => None,
+        }
+    }
+
     /// In-memory byte footprint of all materialized matrix transforms.
     #[must_use]
     pub fn cache_bytes(&self) -> usize {

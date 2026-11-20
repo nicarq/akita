@@ -340,6 +340,7 @@ where
         prepared: &crate::opaque::CpuPreparedSetup<F>,
         witness: ConsumerRelationWitness,
         plan: crate::opaque::ValidatedRelationSessionPlan<'_, F, E>,
+        metal_kernels: bool,
     ) -> Result<Self, AkitaError>
     where
         F: Field + CanonicalEncoding + akita_serialization::AkitaSerialize,
@@ -447,6 +448,7 @@ where
             relation_linear_claim,
             linear_terms,
             additional,
+            metal_kernels,
         )?;
         let claim = akita_sumcheck::SumcheckInstanceProver::input_claim(&prover);
         Ok(Self {

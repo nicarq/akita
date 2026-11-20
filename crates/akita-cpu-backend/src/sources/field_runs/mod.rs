@@ -144,6 +144,14 @@ impl<F: Field> FieldRunPoly<F> {
         remaining.fill(F::zero());
     }
 
+    #[cfg(akita_fold_metal)]
+    pub(crate) fn lookup_columns(&self) -> Option<columns::LookupColumns<'_, F>> {
+        match &self.coefficients {
+            Coefficients::Columns(columns) => Some(columns.view()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn constant_value(&self, range: Range<usize>) -> Option<F> {
         let ends = match &self.coefficients {
             Coefficients::Runs(ends) => ends,

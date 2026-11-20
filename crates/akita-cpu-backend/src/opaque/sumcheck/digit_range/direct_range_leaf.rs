@@ -101,6 +101,8 @@ fn compute_range_round_polynomial_from_range_image<E: Field + Ring + Unreduced>(
 enum LowBasisRangeImageStorage<E: Field> {
     OctetPrefix(OctetPrefix<E>),
     Materialized(Vec<E>),
+    #[cfg(akita_fold_metal)]
+    Metal(metal::MetalQuartic<E>),
 }
 
 struct OctetPrefix<E: Field> {
@@ -167,6 +169,8 @@ enum DirectRangePrefixState<E: Field> {
 /// `DigitRangeProver` wrapper.
 pub struct LowBasisRangeCheckProver<E: Field> {
     range_image: LowBasisRangeImageStorage<E>,
+    #[cfg(akita_fold_metal)]
+    pub(super) metal_kernels: bool,
     split_eq: GruenSplitEq<E>,
     range_poly: RangePoly,
     live_x_cols: usize,
@@ -179,6 +183,8 @@ pub struct LowBasisRangeCheckProver<E: Field> {
 }
 
 mod live_prefix;
+#[cfg(akita_fold_metal)]
+mod metal;
 mod octet_prefix;
 mod prefix_cache;
 mod rounds;
@@ -186,6 +192,9 @@ mod state;
 
 #[cfg(test)]
 mod kernel_tests;
+#[cfg(all(test, akita_fold_metal))]
+#[path = "direct_range_leaf/tests/metal.rs"]
+mod metal_tests;
 #[cfg(test)]
 #[path = "direct_range_leaf/tests/page_boundaries.rs"]
 mod page_boundary_tests;

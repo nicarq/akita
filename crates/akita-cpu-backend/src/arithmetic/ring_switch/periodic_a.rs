@@ -1,6 +1,6 @@
+#[cfg(test)]
 use akita_algebra::CyclotomicRing;
 use jolt_field::solinas::parallel::*;
-use jolt_field::Field;
 
 const MAX_PERIOD: usize = 8;
 const REPEATS_PER_CHECK: usize = 64;
@@ -16,36 +16,10 @@ pub(super) fn checked_row_period<const D: usize>(rows: &[[i32; D]]) -> Option<us
         .then_some(period)
 }
 
-pub(super) fn fold_matrix_columns<F: Field, const D: usize>(
-    matrix: &[CyclotomicRing<F, D>],
-    rows: usize,
-    width: usize,
-    period: usize,
-) -> Vec<CyclotomicRing<F, D>> {
-    cfg_into_iter!(0..rows * period)
-        .map(|slot| {
-            let row = slot / period;
-            let first = slot % period;
-            let mut sum = CyclotomicRing::<F, D>::zero();
-            for source in matrix[row * width..(row + 1) * width]
-                .iter()
-                .skip(first)
-                .step_by(period)
-            {
-                for (coefficient, &value) in
-                    sum.coefficients_mut().iter_mut().zip(source.coefficients())
-                {
-                    *coefficient += value;
-                }
-            }
-            sum
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arithmetic::matrix_columns::fold_matrix_columns;
     use crate::kernels::linear::fused_split_eq_quotients_streamed_prover_bounds;
     use jolt_field::{Prime64Offset59 as F, Ring};
 

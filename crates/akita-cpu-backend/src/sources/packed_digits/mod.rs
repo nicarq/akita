@@ -1,6 +1,8 @@
 //! Exact packed storage for bounded signed prover digits.
 
+mod quad_pairs;
 mod scalar;
+pub(crate) use quad_pairs::PackedQuadPairs;
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -674,6 +676,15 @@ impl<'a> PackedSignedDigitView<'a> {
             decoded_len: 0,
             decoded: [0; DIGITS_PER_BLOCK],
         }
+    }
+
+    #[cfg(akita_fold_metal)]
+    pub(crate) fn three_bit_payload(self) -> Option<(usize, &'a [u8])> {
+        let stored = self.stored_len.saturating_sub(self.start).min(self.len);
+        if self.bit_width != 3 {
+            return None;
+        }
+        Some((stored, self.aligned_bytes(0..stored)?))
     }
 
     pub(crate) fn aligned_bytes(self, range: Range<usize>) -> Option<&'a [u8]> {

@@ -88,6 +88,8 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
             };
         Ok(Self {
             range_image,
+            #[cfg(akita_fold_metal)]
+            metal_kernels: false,
             zero_pages: Vec::new(),
             split_eq,
             range_poly,
@@ -114,6 +116,10 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
                     range_image.len(),
                 ))),
             },
+            #[cfg(akita_fold_metal)]
+            LowBasisRangeImageStorage::Metal(_) => Err(AkitaError::Internal(
+                "range image stayed on Metal after the final fold".into(),
+            )),
             LowBasisRangeImageStorage::OctetPrefix(_) => Err(AkitaError::Internal(
                 "range image stayed in the octet prefix after the final fold".into(),
             )),

@@ -128,17 +128,20 @@ fn packed_zero_lanes_preserve_fold_inputs_and_relation_moments() {
         delta_count: DELTA,
     };
     let mut expected_classes = vec![0; (LANES - 5) * COEFF / 4];
-    let expected = scan_lanes::<E, 3>(&base, 5, &mut expected_classes);
+    let expected = scan_lanes::<E, 3>(&base, 5, Some(&mut expected_classes), LANES - 5);
     let packed = ScanLayout {
         packed_lanes: true,
         ..base
     };
     let mut classes = vec![0; expected_classes.len()];
-    let actual = scan_lanes::<E, 3>(&packed, 5, &mut classes);
+    let actual = scan_lanes::<E, 3>(&packed, 5, Some(&mut classes), LANES - 5);
+    let tiled = scan_lanes::<E, 3>(&packed, 5, None, LANES - 5);
     assert_eq!(classes, expected_classes);
-    assert_eq!(actual.alpha_mass, expected.alpha_mass);
-    assert_eq!(actual.source_mass, expected.source_mass);
-    assert_eq!(actual.even_histogram, expected.even_histogram);
-    assert_eq!(actual.odd_histogram, expected.odd_histogram);
-    assert_eq!(actual.delta_histogram, expected.delta_histogram);
+    for output in [actual, tiled] {
+        assert_eq!(output.alpha_mass, expected.alpha_mass);
+        assert_eq!(output.source_mass, expected.source_mass);
+        assert_eq!(output.even_histogram, expected.even_histogram);
+        assert_eq!(output.odd_histogram, expected.odd_histogram);
+        assert_eq!(output.delta_histogram, expected.delta_histogram);
+    }
 }

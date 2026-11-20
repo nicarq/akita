@@ -67,6 +67,89 @@ int akita_packing_sme_striped(const uint64_t *source, const uint64_t *weights,
     return 1;
 }
 
+#if __clang_major__ >= 21
+#define SOURCE_PRODUCTS(first, second, weight) do { \
+    svuint16_t a = svreinterpret_u16_u64(first); \
+    svuint16_t b = svreinterpret_u16_u64(second); \
+    svuint16_t expanded_weight = svreinterpret_u16_u64(svld1rq_u64(all, weight)); \
+    svuint16_t real = svtbl_u16(expanded_weight, real_indices); \
+    svuint16_t imag = svtbl_u16(expanded_weight, imaginary_indices); \
+    svmopa_za64_u16_m(0, digits, digits, real, a); \
+    svmopa_za64_u16_m(1, digits, digits, imag, a); \
+    svmopa_za64_u16_m(2, digits, digits, real, b); \
+    svmopa_za64_u16_m(3, digits, digits, imag, b); \
+} while (0)
+
+#define SOURCE_COLUMNS(first, second, column, weight) do { \
+    svuint64x4_t left = svread_ver_za64_u64_vg4(first, column); \
+    svuint64x4_t right = svread_ver_za64_u64_vg4(second, column); \
+    SOURCE_PRODUCTS(svget4_u64(left, 0), svget4_u64(right, 0), weight); \
+    SOURCE_PRODUCTS(svget4_u64(left, 1), svget4_u64(right, 1), weight + 2); \
+    SOURCE_PRODUCTS(svget4_u64(left, 2), svget4_u64(right, 2), weight + 4); \
+    SOURCE_PRODUCTS(svget4_u64(left, 3), svget4_u64(right, 3), weight + 6); \
+} while (0)
+
+#define LOAD_SUM(tile) svld1_hor_za64(tile, k, all, saved + (tile * 7 + k) * 8)
+#define SAVE_SUM(tile) svst1_hor_za64(tile, k, all, saved + (tile * 7 + k) * 8)
+
+__attribute__((target("sme2")))
+__arm_locally_streaming __arm_new("za")
+int akita_packing_sme2_source(const uint64_t *source, const uint64_t *weights,
+                            size_t terms, uint64_t *output) {
+    const size_t panel = 64;
+    const size_t positions = terms / 16;
+    if (svcntd() != 8 || terms == 0 || terms > 16 * 1024 || terms % 16 != 0)
+        return 0;
+    uint64_t scratch[128 * 14];
+    svbool_t all = svptrue_b64();
+    svbool_t digits = svptrue_b16();
+    svuint16_t real_indices = svld1_u16(digits, packing_indices[0]);
+    svuint16_t imaginary_indices = svld1_u16(digits, packing_indices[1]);
+    for (size_t first = 0; first < positions; first += panel) {
+        const size_t end = positions - first < panel ? positions : first + panel;
+        for (size_t stripe = 0; stripe < 128; stripe += 16) {
+            uint64_t *saved = scratch + 14 * stripe;
+            svzero_za();
+            if (first != 0) {
+                for (uint32_t k = 0; k < 7; k++) {
+                    LOAD_SUM(0);
+                    LOAD_SUM(1);
+                    LOAD_SUM(2);
+                    LOAD_SUM(3);
+                }
+            }
+            for (size_t p = first; p < end; p++) {
+                const uint64_t *row = source + p * 2048 + stripe * 16;
+                #pragma clang loop unroll(full)
+                for (uint32_t r = 0; r < 8; r++, row += 16) {
+                    svld1_hor_za64(4, r, all, row);
+                    svld1_hor_za64(5, r, all, row + 8);
+                    svld1_hor_za64(6, r, all, row + 128);
+                    svld1_hor_za64(7, r, all, row + 136);
+                }
+                const uint64_t *w = weights + p * 32;
+                SOURCE_COLUMNS(4, 6, 0, w);
+                SOURCE_COLUMNS(5, 7, 0, w + 16);
+                SOURCE_COLUMNS(4, 6, 4, w + 8);
+                SOURCE_COLUMNS(5, 7, 4, w + 24);
+            }
+            if (end != positions) {
+                for (uint32_t k = 0; k < 7; k++) {
+                    SAVE_SUM(0);
+                    SAVE_SUM(1);
+                    SAVE_SUM(2);
+                    SAVE_SUM(3);
+                }
+            } else {
+                STORE(0, 1, 0);
+                STORE(2, 3, 8);
+            }
+        }
+    }
+    return 1;
+}
+#endif
+
 #define ACCUMULATE_COLUMN(source_tile, input_row, weight) do { \
     svuint64_t raw = svread_ver_za64_u64_m(svdup_u64(0), all, source_tile, input_row); \
     svuint16_t source = svreinterpret_u16_u64(raw); \
@@ -138,13 +221,28 @@ static int full_streaming_length(void) {
     return svcntd() == 8;
 }
 
-int akita_packing_sme_available(void) {
+static int cpu_feature(const char *name) {
     int feature = 0;
     size_t size = sizeof(feature);
-    if (sysctlbyname("hw.optional.arm.FEAT_SME", &feature, &size, NULL, 0) || !feature)
-        return 0;
-    feature = 0;
-    size = sizeof(feature);
-    return !sysctlbyname("hw.optional.arm.FEAT_SME_I16I64", &feature, &size, NULL, 0) &&
-        feature && full_streaming_length();
+    return !sysctlbyname(name, &feature, &size, NULL, 0) && feature;
 }
+
+int akita_packing_sme_available(void) {
+    return cpu_feature("hw.optional.arm.FEAT_SME") &&
+        cpu_feature("hw.optional.arm.FEAT_SME_I16I64") && full_streaming_length();
+}
+
+int akita_packing_sme2_available(void) {
+#if __clang_major__ >= 21
+    return cpu_feature("hw.optional.arm.FEAT_SME2");
+#else
+    return 0;
+#endif
+}
+
+#if __clang_major__ < 21
+int akita_packing_sme2_source(const uint64_t *source, const uint64_t *weights,
+                            size_t terms, uint64_t *output) {
+    return akita_packing_sme_source(source, weights, terms, output);
+}
+#endif

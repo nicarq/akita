@@ -44,6 +44,7 @@ impl<E: Field + Ring + Unreduced> RelationRangeImageProver<E> {
             E::zero(),
             PreparedProverLinearTerms::zero(live_lanes, coeff_count),
             None,
+            false,
         )
     }
 
@@ -63,6 +64,7 @@ impl<E: Field + Ring + Unreduced> RelationRangeImageProver<E> {
         relation_linear_claim: E,
         linear_terms: PreparedProverLinearTerms<E>,
         additional_relation_terms: Option<AdditionalRelationTerms<E>>,
+        metal_kernels: bool,
     ) -> Result<Self, AkitaError>
     where
         E: 'static,
@@ -187,6 +189,7 @@ impl<E: Field + Ring + Unreduced> RelationRangeImageProver<E> {
                     b,
                     live_lane_count,
                     coefficient_bits,
+                    metal_kernels,
                 )?;
                 match engine {
                     Some(engine) => Phase::CompactPrefix {
