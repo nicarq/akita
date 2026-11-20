@@ -24,31 +24,53 @@ fn sme2_source_packing_matches_scalar_over_the_final_panel() {
                 [Q - 1 - i, (255 * i) ^ (i << 41)]
             })
             .collect::<Vec<_>>();
-        let mut oracle = [0u128; OUTPUT];
-        for (position, row) in source.as_chunks::<RING_D>().0.iter().enumerate() {
-            for (index, &value) in row.iter().enumerate() {
-                let weight = weights[position * STRIDE + index % STRIDE];
-                for (coordinate, weight) in weight.into_iter().enumerate() {
-                    let sum = &mut oracle[coordinate * (OUTPUT / 2) + index / STRIDE];
-                    *sum = (*sum + u128::from(value) * u128::from(weight) % u128::from(Q))
-                        % u128::from(Q);
-                }
+        assert_sme2_source_matches_scalar(&source, &weights);
+    }
+}
+
+#[cfg(akita_packing_sme)]
+#[test]
+fn sme2_source_packing_matches_scalar_at_full_width_with_maximal_carries() {
+    if !available() || !super::sme2_available() {
+        return;
+    }
+    const POSITIONS: usize = 1024;
+    let source = vec![Q - 1; POSITIONS * RING_D];
+    let weights = vec![[Q - 1; 2]; POSITIONS * STRIDE];
+    let output = assert_sme2_source_matches_scalar(&source, &weights);
+    assert_eq!(output, [(POSITIONS * STRIDE) as u64; OUTPUT]);
+}
+
+#[cfg(akita_packing_sme)]
+fn assert_sme2_source_matches_scalar(source: &[u64], weights: &[[u64; 2]]) -> [u64; OUTPUT] {
+    let (rows, tail) = source.as_chunks::<RING_D>();
+    assert!(tail.is_empty());
+    assert_eq!(weights.len(), rows.len() * STRIDE);
+    let mut oracle = [0u128; OUTPUT];
+    for (position, row) in rows.iter().enumerate() {
+        for (index, &value) in row.iter().enumerate() {
+            let weight = weights[position * STRIDE + index % STRIDE];
+            for (coordinate, weight) in weight.into_iter().enumerate() {
+                let sum = &mut oracle[coordinate * (OUTPUT / 2) + index / STRIDE];
+                *sum =
+                    (*sum + u128::from(value) * u128::from(weight) % u128::from(Q)) % u128::from(Q);
             }
         }
-        let mut actual = [0; OUTPUT];
-        // SAFETY: The runtime feature guards apply above. The contiguous source, weights
-        // and output have the exact lengths for this geometry.
-        let complete = unsafe {
-            super::akita_packing_sme2_source(
-                source.as_ptr(),
-                weights.as_ptr().cast(),
-                positions * STRIDE,
-                actual.as_mut_ptr(),
-            )
-        };
-        assert_ne!(complete, 0);
-        assert_eq!(actual.map(u128::from), oracle);
     }
+    let mut actual = [0; OUTPUT];
+    // SAFETY: The callers check SME2 support. Source, weights and output have
+    // the lengths required by the geometry checked above.
+    let complete = unsafe {
+        super::akita_packing_sme2_source(
+            source.as_ptr(),
+            weights.as_ptr().cast(),
+            weights.len(),
+            actual.as_mut_ptr(),
+        )
+    };
+    assert_ne!(complete, 0);
+    assert_eq!(actual.map(u128::from), oracle);
+    actual
 }
 
 #[test]
