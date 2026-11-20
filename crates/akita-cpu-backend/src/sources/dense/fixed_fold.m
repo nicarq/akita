@@ -20,7 +20,7 @@ static id<MTLBuffer> borrow_pages(id<MTLDevice> device, const void *data, size_t
 
 static id<MTLDevice> device;
 static id<MTLCommandQueue> queue;
-static id<MTLComputePipelineState> products, inverse, packedProducts, packedSums;
+static id<MTLComputePipelineState> products, inverse, packedProducts, packedSums, lookupProducts, lookupSums;
 static void prepare(const char *source) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -43,6 +43,12 @@ static void prepare(const char *source) {
                                                   error:&error];
         packedSums =
             [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"packed_commit_sums"]
+                                                  error:&error];
+        lookupProducts =
+            [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"lookup_commit_products"]
+                                                  error:&error];
+        lookupSums =
+            [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"lookup_commit_sums"]
                                                   error:&error];
     });
 }
@@ -285,5 +291,64 @@ int akita_metal_weighted_rows(void *handle, uint32_t cells, uint32_t rows, const
         [cmd commit];
         [cmd waitUntilCompleted];
         return cmd.status == MTLCommandBufferStatusCompleted;
+    }
+}
+
+typedef struct {
+    uint32_t blocks, columns, tileColumns, tableLen, columnWidth, codeCount, liveCells;
+    int32_t primes[2][4];
+} LookupShape;
+int akita_metal_lookup_commit(const char *source, const LookupShape *shape, const uint16_t *codes,
+                              const int16_t *lookup, size_t lookupBytes, const int32_t *spectra, size_t matrixBytes,
+                              const int32_t *twiddles, const uint32_t *ranges, int32_t *out) {
+    @autoreleasepool {
+        prepare(source);
+        if (!queue || !lookupProducts || !lookupSums || lookupProducts.maxTotalThreadsPerThreadgroup < 256)
+            return 0;
+        size_t outputBytes = (size_t)shape->blocks * 9 * 2 * 512 * 4;
+        size_t groups = (shape->columns + shape->tileColumns - 1) / shape->tileColumns;
+        id<MTLBuffer> key = borrow_pages(device, spectra, matrixBytes);
+        id<MTLBuffer> input = borrow_pages(device, codes, (size_t)shape->codeCount * 2);
+        if (!input || !key)
+            return 0;
+        id<MTLBuffer> table = [device newBufferWithBytes:lookup
+                                                  length:lookupBytes
+                                                 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> tables = [device newBufferWithBytes:twiddles
+                                                   length:2 * 2 * 512 * 4
+                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> partials = [device newBufferWithLength:outputBytes * groups
+                                                     options:MTLResourceStorageModePrivate];
+        id<MTLBuffer> result = [device newBufferWithLength:outputBytes options:MTLResourceStorageModeShared];
+        if (!table || !tables || !partials || !result)
+            return 0;
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        if (!encoder)
+            return 0;
+        [encoder setComputePipelineState:lookupProducts];
+        id<MTLBuffer> buffers[] = {input, table, key, tables, partials};
+        for (size_t i = 0; i < 5; i++)
+            [encoder setBuffer:buffers[i] offset:0 atIndex:i];
+        [encoder setBytes:shape length:sizeof(*shape) atIndex:5];
+        [encoder setBytes:ranges length:shape->blocks * 2 * 4 atIndex:6];
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, (shape->blocks + 1) / 2, 2)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+        encoder = [command computeCommandEncoder];
+        if (!encoder)
+            return 0;
+        [encoder setComputePipelineState:lookupSums];
+        [encoder setBuffer:partials offset:0 atIndex:0];
+        [encoder setBuffer:result offset:0 atIndex:1];
+        [encoder setBytes:shape length:sizeof(*shape) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(outputBytes / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted)
+            return 0;
+        memcpy(out, result.contents, outputBytes);
+        return 1;
     }
 }

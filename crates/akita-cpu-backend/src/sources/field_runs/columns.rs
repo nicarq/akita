@@ -12,7 +12,27 @@ pub(super) struct CodeColumns<F> {
     end: usize,
 }
 
+#[cfg(akita_fold_metal)]
+pub(crate) struct LookupColumns<'a, F> {
+    pub codes: &'a [u16],
+    pub used: &'a [u16],
+    pub tables: &'a [Vec<F>],
+    pub width: usize,
+    pub end: usize,
+}
+
 impl<F: Field> CodeColumns<F> {
+    #[cfg(akita_fold_metal)]
+    pub(super) fn view(&self) -> LookupColumns<'_, F> {
+        LookupColumns {
+            codes: &self.codes,
+            used: &self.used,
+            tables: &self.tables,
+            width: self.width,
+            end: self.end,
+        }
+    }
+
     pub(super) fn new(
         domain: usize,
         width: usize,

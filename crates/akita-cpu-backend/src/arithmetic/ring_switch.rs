@@ -134,8 +134,12 @@ pub(crate) fn relation_b_a_rows<F: Field + CanonicalEncoding, E, const D: usize>
                 .expanded
                 .shared_matrix()
                 .ring_view::<D>(1, extent)?;
-            let grouped =
-                periodic_a::fold_matrix_columns(view.as_slice(), plan.n_a, z.len(), period);
+            let grouped = super::matrix_columns::fold_matrix_columns(
+                view.as_slice(),
+                plan.n_a,
+                z.len(),
+                period,
+            );
             let rhs = &z[..period];
             let magnitude = centered_rows_abs_bound(rhs, period).max(u64::from(z_inf_norm));
             if centered_quotient_requires_i16_tail_for_field::<F, D>(magnitude)? {

@@ -194,3 +194,97 @@ kernel void packed_commit_sums(device const int *partials [[buffer(0)]], device 
     }
     sums[i] = sum;
 }
+
+struct LookupShape {
+    uint blocks, columns, tile_columns, table_len, column_width, code_count, live_cells;
+    akita::NttPrime primes[2];
+};
+inline int lookup_digit(device const ushort *codes, device const short *digits, uint2 range, uint column, uint lane,
+                        constant LookupShape &shape) {
+    uint ring = column / 5;
+    if (ring >= range.y)
+        return 0;
+    uint cell = (range.x + ring) * 512 + lane;
+    uint offset = cell % shape.column_width;
+    if (cell >= shape.live_cells || offset >= shape.code_count)
+        return 0;
+    uint code = codes[offset];
+    if (code >= shape.table_len)
+        return 0;
+    return int(digits[((cell / shape.column_width) * shape.table_len + code) * 5 + column % 5]);
+}
+kernel void lookup_commit_products(device const ushort *codes [[buffer(0)]], device const short *digits [[buffer(1)]],
+                                   device const int *matrix [[buffer(2)]], device const int *twiddles [[buffer(3)]],
+                                   device int *partials [[buffer(4)]], constant LookupShape &shape [[buffer(5)]],
+                                   device const uint2 *ranges [[buffer(6)]],
+                                   uint3 group [[threadgroup_position_in_grid]],
+                                   uint lane [[thread_index_in_threadgroup]]) {
+    constexpr uint D = 512, LIMB_ROWS = 9, BLOCKS_PER_GROUP = 2;
+    uint prime_index = group.z;
+    akita::NttPrime prime = shape.primes[prime_index];
+    device const int *tables = twiddles + prime_index * 2 * D;
+    int lower_twist = tables[D + lane];
+    int upper_twist = tables[D + lane + 256];
+    threadgroup int values[BLOCKS_PER_GROUP][D];
+    int2 accumulators[BLOCKS_PER_GROUP][LIMB_ROWS] = {};
+    for (uint column = group.x * shape.tile_columns; column < min(shape.columns, (group.x + 1) * shape.tile_columns);
+         ++column) {
+        for (uint block_offset = 0; block_offset < BLOCKS_PER_GROUP; block_offset++) {
+            uint block = group.y * BLOCKS_PER_GROUP + block_offset;
+            values[block_offset][lane] = akita::mont_mul(
+                prime, lookup_digit(codes, digits, ranges[min(block, shape.blocks - 1)], column, lane, shape),
+                lower_twist);
+            values[block_offset][lane + 256] = akita::mont_mul(
+                prime, lookup_digit(codes, digits, ranges[min(block, shape.blocks - 1)], column, lane + 256, shape),
+                upper_twist);
+        }
+        for (uint span = 256; span; span >>= 1) {
+            akita::stage_barrier<D>(span, span == 256 ? span : span * 2);
+            uint stage_lane = lane & (span - 1);
+            uint low = ((lane - stage_lane) << 1) + stage_lane;
+            int twiddle = tables[span - 1 + stage_lane];
+            for (uint block_offset = 0; block_offset < BLOCKS_PER_GROUP; block_offset++) {
+                int lower = values[block_offset][low];
+                int upper = values[block_offset][low + span];
+                values[block_offset][low] = akita::reduce_range(prime, lower + upper);
+                values[block_offset][low + span] = akita::mont_mul(prime, lower - upper, twiddle);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint row = 0; row < LIMB_ROWS; row++) {
+            device const int *matrix_row = matrix + ((row * shape.columns + column) * 2 + prime_index) * D;
+            int lower = matrix_row[lane];
+            int upper = matrix_row[lane + 256];
+            for (uint block_offset = 0; block_offset < BLOCKS_PER_GROUP; block_offset++) {
+                accumulators[block_offset][row].x =
+                    akita::reduce_range(prime, accumulators[block_offset][row].x +
+                                                   akita::mont_mul(prime, lower, values[block_offset][lane]));
+                accumulators[block_offset][row].y =
+                    akita::reduce_range(prime, accumulators[block_offset][row].y +
+                                                   akita::mont_mul(prime, upper, values[block_offset][lane + 256]));
+            }
+        }
+    }
+    for (uint block_offset = 0; block_offset < BLOCKS_PER_GROUP; block_offset++) {
+        uint block = group.y * BLOCKS_PER_GROUP + block_offset;
+        if (block >= shape.blocks)
+            continue;
+        for (uint row = 0; row < LIMB_ROWS; row++) {
+            device int *destination =
+                partials + (((group.x * shape.blocks + block) * LIMB_ROWS + row) * 2 + prime_index) * D;
+            destination[lane] = accumulators[block_offset][row].x;
+            destination[lane + 256] = accumulators[block_offset][row].y;
+        }
+    }
+}
+kernel void lookup_commit_sums(device const int *partials [[buffer(0)]], device int *sums [[buffer(1)]],
+                               constant LookupShape &shape [[buffer(2)]], uint index [[thread_position_in_grid]]) {
+    constexpr uint D = 512, LIMB_ROWS = 9;
+    uint stride = shape.blocks * LIMB_ROWS * 2 * D;
+    int sum = 0;
+    akita::NttPrime prime = shape.primes[(index / D) % 2];
+    for (uint tile_columns = 0; tile_columns < (shape.columns + shape.tile_columns - 1) / shape.tile_columns;
+         tile_columns++)
+        sum = akita::reduce_range(prime, sum + partials[tile_columns * stride + index]);
+    sums[index] = sum;
+}

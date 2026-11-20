@@ -260,6 +260,19 @@ impl<const D: usize> PreparedLimbMatrix<D> {
         }
     }
 
+    pub(super) fn i32_view(&self) -> Option<PreparedI32LimbView<'_, D>> {
+        let LimbResidues::I32 { neg, params } = &self.residues else {
+            return None;
+        };
+        Some(PreparedI32LimbView {
+            spectra: neg,
+            params,
+            limbs: self.split.count,
+            limb_bits: self.split.bits,
+            width: self.width,
+        })
+    }
+
     fn len(&self) -> usize {
         match &self.residues {
             LimbResidues::I32 { neg, .. } => neg.len(),

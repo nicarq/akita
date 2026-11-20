@@ -272,32 +272,50 @@ impl<F: Field, E> CpuBackend<F, E> {
         let source = RunDigits::<F, D>::new(poly, shape)?;
 
         let mut distinct = Vec::new();
+        let mut uniform = Vec::new();
         let mut constants = BTreeMap::new();
         let mut block_indices = Vec::with_capacity(block_ranges.len());
         for (index, rings) in block_ranges.into_iter().enumerate() {
-            let constant = poly
-                .constant_value(rings.start * D..rings.end * D)
-                .and_then(|value| value.to_u128_checked());
-            let representative = match constant {
+            let constant = poly.constant_value(rings.start * D..rings.end * D);
+            let representative = match constant.and_then(|value| value.to_u128_checked()) {
                 Some(value) => *constants.entry((value, rings.len())).or_insert(index),
                 None => index,
             };
             block_indices.push(representative);
             if representative == index {
+                uniform.extend(constant.filter(|value| {
+                    value.is_zero() || rings.len() == row_width / shape.num_digits
+                }));
                 distinct.push(rings);
             }
         }
-        let rows = self.commit_rows(
-            prepared,
-            plan.n_a,
-            row_width,
-            &source,
-            &distinct,
-            shape,
-            kernel,
-            false,
-            I8CommitPolicy::Dense,
-        )?;
+        #[cfg(akita_fold_metal)]
+        let device_rows = if self.metal_kernels && uniform.len() < distinct.len() {
+            super::metal_lookup::commit(prepared, poly, &distinct, &plan, row_width)?
+        } else {
+            None
+        };
+        #[cfg(not(akita_fold_metal))]
+        let device_rows = None;
+        let rows = if let Some(rows) = device_rows {
+            rows
+        } else if kernel == SignedDigitKernel::I16 && uniform.len() == distinct.len() {
+            super::matrix_columns::commit_constant_blocks(
+                prepared, plan.n_a, row_width, shape, &uniform,
+            )?
+        } else {
+            self.commit_rows(
+                prepared,
+                plan.n_a,
+                row_width,
+                &source,
+                &distinct,
+                shape,
+                kernel,
+                false,
+                I8CommitPolicy::Dense,
+            )?
+        };
         if rows.len() == block_indices.len() {
             return Ok(rows);
         }
@@ -552,3 +570,7 @@ fn dense_i8_exact_ifma52_preferred<F: Field + CanonicalEncoding, const D: usize>
         rhs_abs_bound,
     ))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/constant_block_commit.rs"]
+mod constant_block_tests;

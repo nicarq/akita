@@ -16,6 +16,7 @@ mod controls;
 mod cyclic_rows;
 mod digit_rows;
 mod exact_i16;
+mod matrix_columns;
 #[cfg(test)]
 mod exact_i16_tests;
 pub(crate) mod extension_opening_reduction;
@@ -24,6 +25,8 @@ pub(crate) mod field_reduction;
 mod kernel_tests;
 #[cfg(akita_fold_metal)]
 pub(crate) mod metal_packed;
+#[cfg(akita_fold_metal)]
+mod metal_lookup;
 #[cfg(all(akita_fold_metal, test))]
 #[path = "../../tests/unit/metal_recursive_commit.rs"]
 mod metal_packed_tests;
