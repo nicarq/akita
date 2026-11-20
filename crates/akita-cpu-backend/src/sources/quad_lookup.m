@@ -133,6 +133,8 @@ int akita_quad_lookup_round(void *h, uint32_t quadsPerEntry, uint32_t pairs,
       return 0;
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (!encoder)
+      return 0;
     [encoder setComputePipelineState:lookupPipeline];
     NSArray *all = @[
       mainBuffer, owner->tail, lookupTable, lowBuffer, highBuffer, out, edge,
