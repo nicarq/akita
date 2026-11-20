@@ -578,6 +578,7 @@ where
             self.prepared()?,
             relation_handle,
             plan,
+            self.metal_kernels,
         )?;
         let binding = self.next_binding(parent)?;
         let lease = binding.scope_lease().clone();

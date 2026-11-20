@@ -1,6 +1,8 @@
 //! Exact packed storage for bounded signed prover digits.
 
+mod quad_pairs;
 mod scalar;
+pub(crate) use quad_pairs::PackedQuadPairs;
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;

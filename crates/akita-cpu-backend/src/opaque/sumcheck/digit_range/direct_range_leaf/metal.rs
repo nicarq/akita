@@ -64,7 +64,11 @@ impl<E: Field + Ring + Unreduced> MetalQuartic<E> {
             .collect();
         let high: Vec<E> = quad_values.iter().map(|&v| v * challenge).collect();
         let values: Vec<E> = (0..65536).map(|i| low[i & 255] + high[i >> 8]).collect();
-        let source = concat!(include_str!("metal.metal"), "\0");
+        let source = concat!(
+            include_str!("../../p64_ext2.metal"),
+            include_str!("metal.metal"),
+            "\0"
+        );
         // SAFETY: DigitRangeSession selects only Ext2<Prime64Offset59>. The handle borrows digits,
         // which stays owned until after the handle drops, and copies the 65,536 field elements.
         let handle = Handle(NonNull::new(unsafe {

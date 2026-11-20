@@ -85,6 +85,7 @@ fn reduced_dense_oracle_matches_factored_stage2_across_all_rounds() {
         direct.relation,
         PreparedProverLinearTerms::zero(live_lane_count, coeff_count),
         None,
+        false,
     )
     .unwrap();
 
@@ -131,6 +132,7 @@ fn reduced_dense_oracle_rejects_a_live_domain_that_disagrees_with_the_witness() 
         F::zero(),
         PreparedProverLinearTerms::zero(live_lane_count, coeff_count),
         None,
+        false,
     );
     assert!(matches!(
         result,

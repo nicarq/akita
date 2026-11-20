@@ -35,6 +35,10 @@ use akita_algebra::eq_poly::EqPolynomial;
 #[path = "constant_quad_norms.rs"]
 mod constant_quad_norms;
 use self::constant_quad_norms::ConstantQuadNorms;
+#[path = "quad_classes.rs"]
+mod quad_classes;
+use crate::sources::packed_digits::PackedQuadPairs;
+use quad_classes::QuadClasses;
 
 /// Maximum number of coefficient rounds served from the compact witness.
 const MAX_PREFIX_ROUNDS: usize = 6;
@@ -66,7 +70,7 @@ pub(super) struct CompactQuotientPrefix<E: Field> {
     /// Last coefficient round the engine serves; it materializes the witness.
     last_round: usize,
     /// Digit class of every witness quad, in witness order.
-    classes: Vec<u16>,
+    classes: QuadClasses,
     norm_cache: Stage2PrefixCache<E>,
     /// Whether round 2 is read from the histograms below (`b <= 8`).
     histogram_round2: bool,
@@ -481,7 +485,8 @@ fn active_packed_lanes(bytes: &[[u8; 48]]) -> [u64; SCAN_CHUNK_LANES / 64] {
 fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
     layout: &ScanLayout<'_, E>,
     first_lane: usize,
-    classes: &mut [u16],
+    mut classes: Option<&mut [u16]>,
+    lane_count: usize,
 ) -> ScanTotals<E> {
     let coeff_count = layout.coeff_count;
     let quads_per_lane = coeff_count / 4;
@@ -512,9 +517,18 @@ fn scan_lanes<E: Field + Unreduced + 'static, const DIGIT_BITS: usize>(
     };
     let mut delta_histogram = vec![E::zero(); layout.delta_count];
 
-    for (chunk, chunk_classes) in classes.chunks_mut(chunk_lanes * quads_per_lane).enumerate() {
-        let chunk_first = first_lane + chunk * chunk_lanes;
-        let lanes = chunk_classes.len() / quads_per_lane;
+    let mut tile = if classes.is_none() {
+        vec![0u16; lane_count.min(chunk_lanes) * quads_per_lane]
+    } else {
+        Vec::new()
+    };
+    for start in (0..lane_count).step_by(chunk_lanes) {
+        let lanes = (lane_count - start).min(chunk_lanes);
+        let chunk_first = first_lane + start;
+        let chunk_classes = match classes.as_deref_mut() {
+            Some(classes) => &mut classes[start * quads_per_lane..(start + lanes) * quads_per_lane],
+            None => &mut tile[..lanes * quads_per_lane],
+        };
         let digits = &mut digits[..lanes * coeff_count];
         let range = chunk_first * coeff_count..(chunk_first + lanes) * coeff_count;
         let packed = layout
@@ -692,19 +706,35 @@ fn lookup_pairs<E: Field + Unreduced, const G: usize, const SKIP_LINEAR: bool>(
     eq_low: &[E],
     eq_high: &[E],
     pairs: std::ops::Range<usize>,
+    out: Option<&mut [E]>,
+) -> [E; 3] {
+    let fold = |entry: usize| {
+        let entry = &classes[entry * G..(entry + 1) * G];
+        let mut value = lookups[usize::from(entry[0])];
+        for (j, &c) in entry.iter().enumerate().skip(1) {
+            value += lookups[j * class_count + usize::from(c)];
+        }
+        value
+    };
+    let uniform = |start: usize, end: usize| {
+        let tile = &classes[start * 2 * G..end * 2 * G];
+        let first = &tile[..2 * G];
+        first == &tile[tile.len() - 2 * G..] && tile.chunks_exact(2 * G).all(|p| p == first)
+    };
+    lookup_pairs_by::<E, G, SKIP_LINEAR>(class_count, fold, uniform, eq_low, eq_high, pairs, out)
+}
+
+fn lookup_pairs_by<E: Field + Unreduced, const G: usize, const SKIP_LINEAR: bool>(
+    class_count: usize,
+    fold_entry: impl Fn(usize) -> E,
+    uniform: impl Fn(usize, usize) -> bool,
+    eq_low: &[E],
+    eq_high: &[E],
+    pairs: std::ops::Range<usize>,
     mut out: Option<&mut [E]>,
 ) -> [E; 3] {
     let low_mask = eq_low.len() - 1;
     let low_bits = eq_low.len().trailing_zeros();
-    let fold_entry = |entry: usize| {
-        let entry_classes = &classes[entry * G..entry * G + G];
-        let mut value = lookups[usize::from(entry_classes[0])];
-        for (offset, &class) in entry_classes.iter().enumerate().skip(1) {
-            value += lookups[offset * class_count + usize::from(class)];
-        }
-        value
-    };
-
     const LOOKUP_TILE_PAIRS: usize = 64;
     let mut lookup_tile = [[E::zero(); 2]; LOOKUP_TILE_PAIRS];
     let tile_pairs = if G == 2 && class_count <= 4096 {
@@ -744,12 +774,7 @@ fn lookup_pairs<E: Field + Unreduced, const G: usize, const SKIP_LINEAR: bool>(
                 };
                 let weight_start = start & low_mask;
                 let weights = &eq_low[weight_start..weight_start + count];
-                let tile_classes = &classes[2 * G * start..2 * G * end];
-                let first = &tile_classes[..2 * G];
-                if count >= 8
-                    && first == &tile_classes[tile_classes.len() - 2 * G..]
-                    && tile_classes.chunks_exact(2 * G).all(|pair| pair == first)
-                {
+                if count >= 8 && uniform(start, end) {
                     let left = fold_entry(2 * start);
                     let right = fold_entry(2 * start + 1);
                     if materialize {
@@ -793,6 +818,7 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
         b: usize,
         live_lane_count: usize,
         coefficient_bits: usize,
+        metal_kernels: bool,
     ) -> Result<Option<Self>, AkitaError>
     where
         E: 'static,
@@ -884,25 +910,44 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
         let task_lanes = live_lane_count
             .div_ceil(parallel_tasks(TASKS_PER_THREAD))
             .max(MIN_SCAN_TASK_LANES);
-        let mut classes = vec![0u16; live_lane_count * quads_per_lane];
-        let scan = |(task, task_classes): (usize, &mut [u16])| match digit_bits {
-            2 => scan_lanes::<E, 2>(&layout, task * task_lanes, task_classes),
-            3 => scan_lanes::<E, 3>(&layout, task * task_lanes, task_classes),
-            _ => scan_lanes::<E, 4>(&layout, task * task_lanes, task_classes),
+        let count = live_lane_count * quads_per_lane;
+        let mut classes = QuadClasses::new::<E>(
+            witness,
+            count,
+            metal_kernels && layout.packed_lanes && last_round >= 3,
+        );
+        let scan = |task: usize, output: Option<&mut [u16]>| {
+            let start = task * task_lanes;
+            let lanes = (live_lane_count - start).min(task_lanes);
+            match digit_bits {
+                2 => scan_lanes::<E, 2>(&layout, start, output, lanes),
+                3 => scan_lanes::<E, 3>(&layout, start, output, lanes),
+                _ => scan_lanes::<E, 4>(&layout, start, output, lanes),
+            }
         };
-        // An empty scan has no compact-prefix work; use the ordinary path.
         #[cfg(feature = "parallel")]
-        let totals = classes
-            .par_chunks_mut(task_lanes * quads_per_lane)
-            .enumerate()
-            .map(scan)
-            .reduce_with(ScanTotals::merge);
+        let totals = match &mut classes {
+            QuadClasses::Expanded(data) => data
+                .par_chunks_mut(task_lanes * quads_per_lane)
+                .enumerate()
+                .map(|(task, out)| scan(task, Some(out)))
+                .reduce_with(ScanTotals::merge),
+            QuadClasses::Packed { .. } => (0..live_lane_count.div_ceil(task_lanes))
+                .into_par_iter()
+                .map(|task| scan(task, None))
+                .reduce_with(ScanTotals::merge),
+        };
         #[cfg(not(feature = "parallel"))]
-        let totals = classes
-            .chunks_mut(task_lanes * quads_per_lane)
-            .enumerate()
-            .map(scan)
-            .reduce(ScanTotals::merge);
+        let totals = match &mut classes {
+            QuadClasses::Expanded(data) => data
+                .chunks_mut(task_lanes * quads_per_lane)
+                .enumerate()
+                .map(|(task, out)| scan(task, Some(out)))
+                .reduce(ScanTotals::merge),
+            QuadClasses::Packed { .. } => (0..live_lane_count.div_ceil(task_lanes))
+                .map(|task| scan(task, None))
+                .reduce(ScanTotals::merge),
+        };
 
         let Some(totals) = totals else {
             return Ok(None);
@@ -1022,8 +1067,8 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
                 )
             }
             2 if self.histogram_round2 => (
-                cfg_iter!(self.classes)
-                    .map(|&class| self.quad_fold[usize::from(class)])
+                cfg_into_iter!(0..self.classes.len())
+                    .map(|index| self.quad_fold[usize::from(self.classes.at(index))])
                     .collect(),
                 PrefixNormRound::Terms(self.round2_norm_terms()),
             ),
@@ -1123,6 +1168,8 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
         split_eq: &GruenSplitEq<E>,
         out: Option<&mut [E]>,
     ) -> [E; 3] {
+        #[cfg(akita_fold_metal)]
+        let mut out = out;
         let class_count = 1 << (4 * self.digit_bits);
         let group_weights = EqPolynomial::evals(&self.challenges[2..])
             .expect("compact prefix challenge count is bounded");
@@ -1146,6 +1193,24 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
         };
         let (eq_low, eq_high) = split_eq.remaining_eq_tables();
         let pair_count = self.classes.len() / (2 * G);
+        #[cfg(akita_fold_metal)]
+        if let QuadClasses::Packed {
+            metal: Some(metal), ..
+        } = &self.classes
+        {
+            // SAFETY: Packed construction selects Ext2<Prime64Offset59>. Each pair covers 2*G quads.
+            if let Some(sums) = unsafe {
+                metal.evaluate::<E, G, SKIP_LINEAR>(
+                    pair_count,
+                    lookups,
+                    eq_low,
+                    eq_high,
+                    out.as_deref_mut(),
+                )
+            } {
+                return sums;
+            }
+        }
         let task_pairs = pair_count
             .div_ceil(parallel_tasks(TASKS_PER_THREAD))
             .max(MIN_LOOKUP_TASK_PAIRS);
@@ -1155,20 +1220,42 @@ impl<E: Field + Ring + Unreduced> CompactQuotientPrefix<E> {
         let run = |task: usize, out: Option<&mut [E]>| {
             let start = task * task_pairs;
             let pairs = start..(start + task_pairs).min(pair_count);
-            if let Some(norms) = &constant_quad_norms {
-                if ConstantQuadNorms::<E>::supports(&self.classes, &pairs) {
-                    return norms.sum(lookups, &self.classes, eq_low, eq_high, pairs);
+            match &self.classes {
+                QuadClasses::Expanded(classes) => {
+                    if let Some(norms) = &constant_quad_norms {
+                        if ConstantQuadNorms::<E>::supports(classes, &pairs) {
+                            return norms.sum(lookups, classes, eq_low, eq_high, pairs);
+                        }
+                    }
+                    lookup_pairs::<E, G, SKIP_LINEAR>(
+                        lookups,
+                        class_count,
+                        classes,
+                        eq_low,
+                        eq_high,
+                        pairs,
+                        out,
+                    )
+                }
+                QuadClasses::Packed { witness, .. } => {
+                    let raw = PackedQuadPairs::new(witness.view())
+                        .expect("packed quad witness was validated at construction");
+                    let fold = |entry: usize| {
+                        (0..G).fold(E::zero(), |sum, j| {
+                            sum + lookups[j * class_count + usize::from(raw.at(entry * G + j))]
+                        })
+                    };
+                    lookup_pairs_by::<E, G, SKIP_LINEAR>(
+                        class_count,
+                        fold,
+                        |s, e| raw.uniform::<G>(s, e),
+                        eq_low,
+                        eq_high,
+                        pairs,
+                        out,
+                    )
                 }
             }
-            lookup_pairs::<E, G, SKIP_LINEAR>(
-                lookups,
-                class_count,
-                &self.classes,
-                eq_low,
-                eq_high,
-                pairs,
-                out,
-            )
         };
         let parts: Vec<[E; 3]> = match out {
             Some(out) => cfg_chunks_mut!(out, 2 * task_pairs)
@@ -1273,3 +1360,7 @@ mod basis16_lookup_tests;
 #[cfg(test)]
 #[path = "class_tile_histogram_tests.rs"]
 mod class_tile_histogram_tests;
+
+#[cfg(test)]
+#[path = "tests/packed_quad_rounds.rs"]
+mod packed_quad_rounds;
