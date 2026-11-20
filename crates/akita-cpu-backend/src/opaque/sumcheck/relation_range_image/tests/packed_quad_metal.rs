@@ -2,6 +2,32 @@ use super::super::super::packed_quad_rounds::{inputs, witness_classes, E};
 use super::MetalLookup;
 use jolt_field::Zero;
 
+unsafe extern "C" {
+    fn akita_quad_lookup_buffers_fit(
+        limit: usize,
+        body: usize,
+        tail: usize,
+        largest_copy: usize,
+    ) -> i32;
+}
+
+#[test]
+fn oversized_metal_buffers_take_the_cpu_fallback() {
+    let page = 16_384;
+    let limit = 2 * page;
+    let fits = |bytes: usize, copied| {
+        // SAFETY: The native size check takes scalar byte counts and accesses no storage.
+        unsafe {
+            akita_quad_lookup_buffers_fit(limit, bytes / page * page, bytes % page, copied) != 0
+        }
+    };
+    assert!(fits(limit, limit));
+    assert!(fits(limit + page - 1, limit));
+    assert!(!fits(limit + page, limit));
+    assert!(!fits(limit, limit + 1));
+    assert!(!fits(usize::MAX, 0));
+}
+
 fn check<const G: usize, const SKIP: bool>(handle: &MetalLookup, classes: &[u16]) {
     let pairs = classes.len() / (2 * G);
     let (table, low, high) = inputs::<G>(pairs);

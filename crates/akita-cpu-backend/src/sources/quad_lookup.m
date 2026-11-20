@@ -10,6 +10,7 @@ typedef struct {
 @public
   id<MTLBuffer> main;
   id<MTLBuffer> tail;
+  size_t quadPairs;
 }
 @end
 @implementation AKPackedQuadSource
@@ -18,6 +19,10 @@ typedef struct {
 static id<MTLDevice> device;
 static id<MTLCommandQueue> queue;
 static id<MTLComputePipelineState> lookupPipeline, reducePipeline;
+int akita_quad_lookup_buffers_fit(size_t limit, size_t body, size_t tail,
+                                  size_t largestCopy) {
+  return body <= limit && MAX(tail, 16) <= limit && largestCopy <= limit;
+}
 static id<MTLBuffer> alias(void *pointer, size_t length) {
   return [device newBufferWithBytesNoCopy:pointer
                                    length:length
@@ -54,6 +59,8 @@ void *akita_quad_lookup_open(const uint8_t *bytes, size_t length,
         reducePipeline.threadExecutionWidth != 32 ||
         lookupPipeline.maxTotalThreadsPerThreadgroup < 128 ||
         reducePipeline.maxTotalThreadsPerThreadgroup < 96 || !body ||
+        length > UINT32_MAX || length % 3 ||
+        !akita_quad_lookup_buffers_fit(device.maxBufferLength, body, tail, 0) ||
         ((uintptr_t)bytes % page))
       return NULL;
     id<MTLBuffer> mainBuffer = alias((void *)bytes, body),
@@ -65,6 +72,7 @@ void *akita_quad_lookup_open(const uint8_t *bytes, size_t length,
     AKPackedQuadSource *owner = [AKPackedQuadSource new];
     owner->main = mainBuffer;
     owner->tail = tailBuffer;
+    owner->quadPairs = length / 3;
     return (__bridge_retained void *)owner;
   }
 }
@@ -83,7 +91,8 @@ int akita_quad_lookup_round(void *h, uint32_t quadsPerEntry, uint32_t pairs,
     id<MTLBuffer> mainBuffer = owner->main;
     size_t page = getpagesize(), length = target ? (size_t)pairs * 32 : 0,
            body = length / page * page, tail = length - body;
-    if (!lowLength || ((uintptr_t)target % page) ||
+    if (!pairs || (uint64_t)pairs * quadsPerEntry != owner->quadPairs ||
+        !lowLength || ((uintptr_t)target % page) ||
         highLength < (pairs + lowLength - 1) / lowLength)
       return 0;
     PackedQuadShape shape = {quadsPerEntry,
@@ -95,20 +104,27 @@ int akita_quad_lookup_round(void *h, uint32_t quadsPerEntry, uint32_t pairs,
                              (uint32_t)(body / 16),
                              (uint32_t)mainBuffer.length,
                              target != NULL};
-    id<MTLBuffer> lookupTable = [device
-                      newBufferWithBytes:lookupValues
-                                  length:(size_t)quadsPerEntry * classCount * 16
-                                 options:0],
+    size_t lookupBytes = (size_t)quadsPerEntry * classCount * 16,
+           lowBytes = (size_t)lowLength * 16,
+           highBytes = (size_t)highLength * 16,
+           partialBytes = (size_t)shape.groupCount * 48;
+    size_t largestCopy =
+        MAX(MAX(lookupBytes, lowBytes), MAX(highBytes, partialBytes));
+    if (!akita_quad_lookup_buffers_fit(device.maxBufferLength, body, tail,
+                                       largestCopy))
+      return 0;
+    id<MTLBuffer> lookupTable = [device newBufferWithBytes:lookupValues
+                                                    length:lookupBytes
+                                                   options:0],
                   lowBuffer = [device newBufferWithBytes:lowWeights
-                                                  length:(size_t)lowLength * 16
+                                                  length:lowBytes
                                                  options:0],
-                  highBuffer =
-                      [device newBufferWithBytes:highWeights
-                                          length:(size_t)highLength * 16
-                                         options:0],
+                  highBuffer = [device newBufferWithBytes:highWeights
+                                                   length:highBytes
+                                                  options:0],
                   edge = [device newBufferWithLength:MAX(tail, 16) options:0],
                   partial = [device
-                      newBufferWithLength:shape.groupCount * 48
+                      newBufferWithLength:partialBytes
                                   options:MTLResourceStorageModePrivate],
                   result = [device newBufferWithLength:48 options:0];
     id<MTLBuffer> out = body ? alias(target, body) : edge;
