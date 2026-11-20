@@ -41,7 +41,11 @@ fn main() {
     };
     let clang_target = format!("--target=arm64-apple-macosx{deployment}");
     let metal_archive = directory.join("libakita_fold_metal.a");
-    let sources = ["src/sources/dense/fixed_fold.m", "src/sources/quartic.m"];
+    let sources = [
+        "src/sources/dense/fixed_fold.m",
+        "src/sources/quartic.m",
+        "src/arithmetic/metal_quotient.m",
+    ];
     let mut archive = Command::new("xcrun");
     archive
         .args(["--sdk", "macosx", "ar", "crs"])

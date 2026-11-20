@@ -168,6 +168,26 @@ pub(crate) fn relation_b_a_rows<F: Field + CanonicalEncoding, E, const D: usize>
             }
         }
     }
+    #[cfg(akita_fold_metal)]
+    if backend.metal_kernels
+        && plan.n_b == 0
+        && super::requirements::streamable_quotient_shape(D, plan.n_a, z.len())
+    {
+        crate::validation::validate_i8_input_log_basis(plan.log_basis_outer, "for i8 NTT kernels")?;
+        let bound = centered_rows_abs_bound(z, z.len()).max(u64::from(z_inf_norm));
+        if centered_quotient_requires_i16_tail_for_field::<F, D>(bound)? {
+            if let Some(row) = super::metal_quotient::quotient(
+                prepared.expanded.shared_matrix().as_field_slice(),
+                z,
+                bound,
+            ) {
+                return Ok(FusedQuotientRows {
+                    b_cyclic: Vec::new(),
+                    a_quotients: vec![row],
+                });
+            }
+        }
+    }
     if backend.ntt_operation_uses_cache(NttOperationCluster::RingSwitch, extent) {
         return cached_b_a_rows(prepared, t_hat, z, z_inf_norm, plan);
     }

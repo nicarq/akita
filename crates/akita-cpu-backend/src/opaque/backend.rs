@@ -286,8 +286,15 @@ impl<F: Field, E> CpuBackend<F, E> {
         cluster: crate::arithmetic::requirements::NttOperationCluster,
         num_ring_elements: usize,
     ) -> bool {
-        let cached = cluster != crate::arithmetic::requirements::NttOperationCluster::RingSwitch
-            || num_ring_elements <= self.max_cached_ring_switch_elements;
+        use crate::arithmetic::requirements::NttOperationCluster;
+        let cached = match cluster {
+            NttOperationCluster::Commit => true,
+            #[cfg(akita_fold_metal)]
+            NttOperationCluster::WideCenteredQuotient if self.metal_kernels => false,
+            NttOperationCluster::RingSwitch | NttOperationCluster::WideCenteredQuotient => {
+                num_ring_elements <= self.max_cached_ring_switch_elements
+            }
+        };
         tracing::debug!(
             ?cluster,
             num_ring_elements,
