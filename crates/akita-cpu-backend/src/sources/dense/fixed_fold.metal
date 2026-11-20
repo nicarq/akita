@@ -72,7 +72,22 @@ struct FoldShape {
     akita::NttPrime prime;
 };
 
-kernel void fold_products(device const int *keys [[buffer(0)]], device const int *weights [[buffer(1)]],
+inline int4 unpack_spectrum(device const uint *row, uint quartet) {
+    uint offset = 4 * quartet - uint(quartet == 3);
+    uint4 current = uint4(*(device const packed_uint4 *)(row + offset));
+    uint4 previous = simd_shuffle_up(current, 1);
+    if (quartet == 3) {
+        current = uint4(current.y, (current.y >> 24) | (current.z << 8),
+                        (current.z >> 16) | (current.w << 16), current.w >> 8);
+    }
+    uint shift = 2 * quartet;
+    uint4 bits = current << shift;
+    if (quartet != 0)
+        bits |= previous >> ((32 - shift) & 31);
+    return as_type<int4>(bits << 2) >> 2;
+}
+
+kernel void fold_products(device const uint *keys [[buffer(0)]], device const int *weights [[buffer(1)]],
                           device int *spectra [[buffer(2)]], constant FoldShape &shape [[buffer(3)]],
                           uint index [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
     uint group = index >> 5;
@@ -81,7 +96,7 @@ kernel void fold_products(device const int *keys [[buffer(0)]], device const int
     ulong row = ulong(group) * shape.blocks;
     int4 sum = 0;
     for (uint block = shape.begin + (lane >> 2); block < shape.end; block += 8) {
-        int4 key = ((device const int4 *)keys)[(row + block) * 4 + quartet];
+        int4 key = unpack_spectrum(keys + (row + block) * 15, quartet);
         int weight = weights[frequency * shape.blocks + block];
         for (uint i = 0; i < 4; i++) {
             sum[i] = akita::reduce_range(shape.prime, sum[i] + akita::mont_mul(shape.prime, key[i], weight));

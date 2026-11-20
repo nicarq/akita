@@ -11,7 +11,13 @@ fn metal_subring_fold_matches_cpu() {
         ((state >> 31) as i64 % PRIME.p as i64 - PRIME.p as i64 / 2) as i32
     };
     let spectra = (0..positions * DIGITS * SUBRING_D * blocks)
-        .map(|_| std::array::from_fn(|_| next_word()))
+        .map(|_| {
+            let mut row = PackedSpectrum::default();
+            for lane in 0..STRIDE {
+                row.write(lane, next_word());
+            }
+            row
+        })
         .collect::<Vec<_>>();
     let cache = FixedFoldNtt {
         positions,
