@@ -1,4 +1,4 @@
-use super::{run, LookupShape};
+use super::{run, workspace_fits, LookupShape};
 use akita_params::FlatMatrix;
 use akita_types::ntt_cache::{prepare_ntt_cache, NttCacheMode};
 use jolt_field::{Prime64Offset59 as F, Ring};
@@ -68,4 +68,13 @@ fn mixed_lookup_matches_cpu_for_partial_odd_and_empty_ranges() {
             .collect::<Vec<_>>();
         assert_eq!(rows, cache.mat_vec_i16::<F>(13, 3, &rhs).unwrap());
     }
+}
+
+#[test]
+fn lookup_workspace_includes_host_and_device_tables() {
+    assert!(!workspace_fits::<512>(64, 5120, 4 * 8193, 10));
+    assert!(!workspace_fits::<512>(64, 5120, 25_550, 10));
+    assert!(workspace_fits::<512>(64, 5120, 4 * 8193, 11));
+    assert!(workspace_fits::<512>(61, 5120, 4 * 5633, 10));
+    assert!(!workspace_fits::<512>(61, 5120, 4 * 5633, 9));
 }

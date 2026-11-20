@@ -35,6 +35,24 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+fn workspace_fits<const D: usize>(
+    blocks: usize,
+    width: usize,
+    cells: usize,
+    workers: usize,
+) -> bool {
+    let output = blocks * 9 * size_of::<CyclotomicCrtNtt<i32, 2, D>>();
+    let spectra = output * (width.div_ceil(256) + 2);
+    let table = cells * size_of::<[i16; 5]>();
+    let twiddles = 4 * D * size_of::<i32>();
+    let ranges = blocks * size_of::<[u32; 2]>();
+    let workspace = spectra + 2 * (table + twiddles + ranges) + 3 * size_of::<LookupShape>();
+    workspace
+        <= workers
+            .min(blocks)
+            .saturating_mul(width * D * size_of::<i16>())
+}
+
 pub(super) fn commit<F: Field + CanonicalEncoding, const D: usize>(
     prepared: &CpuPreparedSetup<F>,
     poly: &FieldRunPoly<F>,
@@ -72,9 +90,7 @@ pub(super) fn commit<F: Field + CanonicalEncoding, const D: usize>(
     let workers = rayon::current_num_threads();
     #[cfg(not(feature = "parallel"))]
     let workers = 1usize;
-    let output_bytes = ranges.len() * 9 * 2 * D * 4;
-    let scratch = output_bytes * (width.div_ceil(256) + 2) + cells * 5 * 2;
-    if scratch > workers.saturating_mul(width * D * 2) {
+    if !workspace_fits::<D>(ranges.len(), width, cells, workers) {
         return Ok(None);
     }
     static IN_USE: Mutex<()> = Mutex::new(());
