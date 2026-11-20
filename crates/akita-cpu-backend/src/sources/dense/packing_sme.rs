@@ -26,6 +26,13 @@ type BlockKernel = unsafe extern "C" fn(*const u64, *const u64, usize, *mut u64)
 #[cfg(akita_packing_sme)]
 unsafe extern "C" {
     fn akita_packing_sme_available() -> std::ffi::c_int;
+    fn akita_packing_sme2_available() -> std::ffi::c_int;
+    fn akita_packing_sme2_source(
+        source: *const u64,
+        weights: *const u64,
+        terms: usize,
+        output: *mut u64,
+    ) -> std::ffi::c_int;
     fn akita_packing_sme_striped(
         source: *const u64,
         weights: *const u64,
@@ -45,6 +52,13 @@ fn available() -> bool {
     static SUPPORT: OnceLock<bool> = OnceLock::new();
     // SAFETY: The platform query accesses no Rust memory.
     *SUPPORT.get_or_init(|| unsafe { akita_packing_sme_available() != 0 })
+}
+
+#[cfg(akita_packing_sme)]
+fn sme2_available() -> bool {
+    static SUPPORT: OnceLock<bool> = OnceLock::new();
+    // SAFETY: This query checks CPU capabilities without entering streaming mode.
+    *SUPPORT.get_or_init(|| unsafe { akita_packing_sme2_available() != 0 })
 }
 
 #[cfg(not(akita_packing_sme))]
@@ -329,8 +343,21 @@ impl PackingStripes {
             if !available() {
                 return Ok(None);
             }
-            let Some(words) = self.words.get_or_init(|| self.transpose(raw)).as_ref() else {
-                return Ok(None);
+            #[cfg(feature = "parallel")]
+            let workers = rayon::current_num_threads();
+            #[cfg(not(feature = "parallel"))]
+            let workers = 1usize;
+            let stream = workers >= 16
+                && active_blocks / workers >= 8
+                && self.positions >= 512
+                && sme2_available();
+            let (words, raw_kernel): (&[u64], BlockKernel) = if stream {
+                (&[], akita_packing_sme2_source)
+            } else {
+                let Some(words) = self.words.get_or_init(|| self.transpose(raw)).as_ref() else {
+                    return Ok(None);
+                };
+                (words, akita_packing_sme_source)
             };
             let words_per_block = self.positions * RING_D;
             let complete =
@@ -342,10 +369,10 @@ impl PackingStripes {
                         let (words, contract): (&[u64], BlockKernel) =
                             match words.get(range.clone()) {
                                 Some(packed) => (packed, akita_packing_sme_striped),
-                                None => (&raw[range], akita_packing_sme_source),
+                                None => (&raw[range], raw_kernel),
                             };
                         // SAFETY: Both kernels read one full block and its weight pairs
-                        // and write OUTPUT words. The runtime checks SME support.
+                        // and write OUTPUT words. The selected path checks its ISA.
                         let ok = unsafe {
                             contract(
                                 words.as_ptr(),

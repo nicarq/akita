@@ -8,6 +8,49 @@ use jolt_field::{Ext2, ExtField, Prime64Offset59, Ring};
 type F = Prime64Offset59;
 type E = Ext2<F>;
 
+#[cfg(akita_packing_sme)]
+#[test]
+fn sme2_source_packing_matches_scalar_over_the_final_panel() {
+    if !available() || !super::sme2_available() {
+        return;
+    }
+    for positions in [64, 65, 129] {
+        let source = (0..positions * RING_D)
+            .map(|i| [0, 1, Q - 1, Q - 2, Q / 2, 65535][(i * 7 + i / 13) % 6])
+            .collect::<Vec<_>>();
+        let weights = (0..positions * STRIDE)
+            .map(|i| {
+                let i = i as u64;
+                [Q - 1 - i, (255 * i) ^ (i << 41)]
+            })
+            .collect::<Vec<_>>();
+        let mut oracle = [0u128; OUTPUT];
+        for (position, row) in source.as_chunks::<RING_D>().0.iter().enumerate() {
+            for (index, &value) in row.iter().enumerate() {
+                let weight = weights[position * STRIDE + index % STRIDE];
+                for (coordinate, weight) in weight.into_iter().enumerate() {
+                    let sum = &mut oracle[coordinate * (OUTPUT / 2) + index / STRIDE];
+                    *sum = (*sum + u128::from(value) * u128::from(weight) % u128::from(Q))
+                        % u128::from(Q);
+                }
+            }
+        }
+        let mut actual = [0; OUTPUT];
+        // SAFETY: The runtime feature guards apply above. The contiguous source, weights
+        // and output have the exact lengths for this geometry.
+        let complete = unsafe {
+            super::akita_packing_sme2_source(
+                source.as_ptr(),
+                weights.as_ptr().cast(),
+                positions * STRIDE,
+                actual.as_mut_ptr(),
+            )
+        };
+        assert_ne!(complete, 0);
+        assert_eq!(actual.map(u128::from), oracle);
+    }
+}
+
 #[test]
 fn fixed_packing_stripes_match_scalar_products_and_zero_suffix() {
     if !available() && !cfg!(akita_fold_metal) {
