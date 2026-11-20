@@ -21,77 +21,8 @@ const PRIME: NttPrime<i32> = Q64_PRIMES[0];
 const P: i64 = PRIME.p as i64;
 const DOT_BATCH: usize = 32;
 
-const _: () = assert!(PRIME.p > 0 && PRIME.p < 1 << 30);
-const _: () = assert!(std::mem::size_of::<PackedSpectrum>() == 60);
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct PackedSpectrum {
-    words: [[u32; 4]; 3],
-    tail: [u8; 12],
-}
-
-impl PackedSpectrum {
-    fn write(&mut self, lane: usize, centered: i32) {
-        let bits = centered as u32 & 0x3fff_ffff;
-        let i = lane % 4;
-        match lane / 4 {
-            0 => self.words[0][i] |= bits,
-            1 => {
-                self.words[0][i] |= bits << 30;
-                self.words[1][i] |= bits >> 2;
-            }
-            2 => {
-                self.words[1][i] |= bits << 28;
-                self.words[2][i] |= bits >> 4;
-            }
-            3 => {
-                self.words[2][i] |= bits << 26;
-                self.tail[i * 3..i * 3 + 3].copy_from_slice(&(bits >> 6).to_le_bytes()[..3]);
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn unpack(&self) -> [i32; STRIDE] {
-        let [a, b, c] = self.words;
-        std::array::from_fn(|lane| {
-            let i = lane % 4;
-            let bits = match lane / 4 {
-                0 => a[i],
-                1 => a[i] >> 30 | b[i] << 2,
-                2 => b[i] >> 28 | c[i] << 4,
-                _ => {
-                    let [x, y, z] = self.tail[i * 3..i * 3 + 3].try_into().unwrap();
-                    c[i] >> 26 | u32::from_le_bytes([x, y, z, 0]) << 6
-                }
-            };
-            (bits << 2) as i32 >> 2
-        })
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    #[target_feature(enable = "neon")]
-    unsafe fn unpack_neon(&self) -> [std::arch::aarch64::int32x4_t; 4] {
-        use std::arch::aarch64::*;
-        // SAFETY: each group contains four words. The final load covers bytes 44 through 59.
-        unsafe {
-            let a = vld1q_u32(self.words[0].as_ptr());
-            let b = vld1q_u32(self.words[1].as_ptr());
-            let c = vld1q_u32(self.words[2].as_ptr());
-            let last = vld1q_u8(std::ptr::from_ref(self).cast::<u8>().add(44));
-            let lanes = [4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255, 13, 14, 15, 255];
-            let d = vreinterpretq_u32_u8(vqtbl1q_u8(last, vld1q_u8(lanes.as_ptr())));
-            [
-                a,
-                vorrq_u32(vshrq_n_u32::<30>(a), vshlq_n_u32::<2>(b)),
-                vorrq_u32(vshrq_n_u32::<28>(b), vshlq_n_u32::<4>(c)),
-                vorrq_u32(vshrq_n_u32::<26>(c), vshlq_n_u32::<6>(d)),
-            ]
-            .map(|v| vshrq_n_s32::<2>(vreinterpretq_s32_u32(vshlq_n_u32::<2>(v))))
-        }
-    }
-}
+mod packed;
+use packed::PackedSpectrum;
 
 type Dot = fn(&[PackedSpectrum], &[i32]) -> [i32; STRIDE];
 
@@ -102,7 +33,7 @@ pub(super) struct FixedFoldNtt {
     #[cfg(akita_fold_metal)]
     metal: std::sync::OnceLock<Option<MetalKey>>,
     // [position][digit][frequency][block][residue]
-    spectra: Vec<PackedSpectrum>,
+    spectra: Vec<u32>,
     twiddles: NttTwiddles<i32, SUBRING_D>,
     ntt: NttKernelPlan,
     dot: Dot,
@@ -162,12 +93,17 @@ impl FixedFoldNtt {
             checked::product([positions, DIGITS, SUBRING_D, blocks]).ok_or_else(|| {
                 AkitaError::InvalidInput("fixed fold NTT cache size overflows usize".into())
             })?;
-        let mut spectra = zero_vec(spectra_len, PackedSpectrum::default())?;
+        let words = packed::storage_words(spectra_len, packed::page_words()).ok_or_else(|| {
+            AkitaError::InvalidInput("fixed fold NTT cache size overflows usize".into())
+        })?;
+        let mut spectra = zero_vec(words, 0u32)?;
         let ntt = NttKernelPlan::detect::<i32>();
         let twiddles = NttTwiddles::compute(PRIME);
         let params = BalancedDecomposePow2Params::new(DIGITS, LOG_BASIS);
         if blocks != 0 {
-            cfg_chunks_mut!(spectra, DIGITS * SUBRING_D * blocks)
+            let (rows, _) = spectra.as_chunks_mut::<15>();
+            let rows = &mut rows[..spectra_len];
+            cfg_chunks_mut!(rows, DIGITS * SUBRING_D * blocks)
                 .enumerate()
                 .for_each(|(position, spectra)| {
                     let mut digits = [[0i16; RING_D]; DIGITS];
@@ -183,8 +119,12 @@ impl FixedFoldNtt {
                                     });
                                 forward_ntt(&mut transformed, PRIME, &twiddles, ntt);
                                 for (frequency, value) in transformed.into_iter().enumerate() {
-                                    spectra[(digit * SUBRING_D + frequency) * blocks + block]
-                                        .write(residue, PRIME.center(value.raw()));
+                                    packed::write(
+                                        &mut spectra
+                                            [(digit * SUBRING_D + frequency) * blocks + block],
+                                        residue,
+                                        PRIME.center(value.raw()),
+                                    );
                                 }
                             }
                         }
@@ -192,7 +132,7 @@ impl FixedFoldNtt {
                 });
         }
         let dot: Dot = dot_scalar;
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
         let dot = if akita_algebra::ntt::neon::use_neon_ntt() {
             dot_neon
         } else {
@@ -303,6 +243,7 @@ impl FixedFoldNtt {
         spectrum_challenges: &[i32],
         part: &mut [[i32; D]],
     ) {
+        let (spectra, _) = self.spectra.as_chunks::<15>();
         cfg_chunks_mut!(part, 1)
             .enumerate()
             .for_each(|(destination, row)| {
@@ -311,7 +252,7 @@ impl FixedFoldNtt {
                     let key = (destination * SUBRING_D + frequency) * self.blocks;
                     let challenge = frequency * self.blocks;
                     *spectrum = (self.dot)(
-                        &self.spectra[key + blocks.start..key + blocks.end],
+                        &spectra[key + blocks.start..key + blocks.end],
                         &spectrum_challenges[challenge + blocks.start..challenge + blocks.end],
                     );
                 }
@@ -435,7 +376,7 @@ fn dot_scalar(key: &[PackedSpectrum], challenge: &[i32]) -> [i32; STRIDE] {
     for (key, challenge) in key.chunks(DOT_BATCH).zip(challenge.chunks(DOT_BATCH)) {
         let mut tile = [0i64; STRIDE];
         for (row, &weight) in key.iter().zip(challenge) {
-            for (sum, value) in tile.iter_mut().zip(row.unpack()) {
+            for (sum, value) in tile.iter_mut().zip(packed::unpack(row)) {
                 *sum += i64::from(value) * i64::from(weight);
             }
         }
@@ -446,7 +387,7 @@ fn dot_scalar(key: &[PackedSpectrum], challenge: &[i32]) -> [i32; STRIDE] {
     total.map(|v| (v % P) as i32)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 fn dot_neon(key: &[PackedSpectrum], challenge: &[i32]) -> [i32; STRIDE] {
     use std::arch::aarch64::*;
 
@@ -458,7 +399,7 @@ fn dot_neon(key: &[PackedSpectrum], challenge: &[i32]) -> [i32; STRIDE] {
             let mut sums = [vdupq_n_s64(0); STRIDE / 2];
             for (row, &weight) in key.iter().zip(challenge) {
                 let weight = vdupq_n_s32(weight);
-                for (i, value) in row.unpack_neon().into_iter().enumerate() {
+                for (i, value) in packed::unpack_neon(row).into_iter().enumerate() {
                     sums[2 * i] = vmlal_s32(sums[2 * i], vget_low_s32(value), vget_low_s32(weight));
                     sums[2 * i + 1] = vmlal_high_s32(sums[2 * i + 1], value, weight);
                 }
