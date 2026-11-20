@@ -56,4 +56,12 @@ fn metal_quotient_matches_cpu_across_chunk_boundaries() {
         .a_quotients;
     assert_eq!(actual, expected);
     assert_eq!(prepared.shared_ntt_cache_bytes(), 0);
+    for backend in [&cpu, &gpu] {
+        let actual =
+            super::ring_switch::relation_b_a_rows(backend, prepared, &[], &rhs, bound, plan)
+                .unwrap()
+                .a_quotients;
+        assert_eq!(actual, expected);
+        assert!(prepared.shared_ntt_cache_bytes() > 0);
+    }
 }
