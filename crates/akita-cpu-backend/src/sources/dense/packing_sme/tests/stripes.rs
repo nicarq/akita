@@ -10,7 +10,7 @@ type E = Ext2<F>;
 
 #[test]
 fn fixed_packing_stripes_match_scalar_products_and_zero_suffix() {
-    if !available() {
+    if !available() && !cfg!(akita_fold_metal) {
         return;
     }
     const VARS: usize = 21;
@@ -51,10 +51,6 @@ fn fixed_packing_stripes_match_scalar_products_and_zero_suffix() {
         .flat_map(|ring| ring.coefficients().iter().copied())
         .collect();
     let cache = PackingStripes::new(&rings, POSITIONS).unwrap();
-    let partials = cache
-        .contract::<F, E, RING_D>(VARS, &source, &weights)
-        .unwrap()
-        .unwrap();
     let mut expected = vec![F::from_u64(0); 16 * OUTPUT];
     for (block, rows) in rings.chunks_exact(POSITIONS).enumerate() {
         let mut sums = [E::new(F::from_u64(0), F::from_u64(0)); RING_D / STRIDE];
@@ -70,13 +66,59 @@ fn fixed_packing_stripes_match_scalar_products_and_zero_suffix() {
         }
     }
     assert_ne!(expected[..OUTPUT], expected[7 * OUTPUT..8 * OUTPUT]);
-    assert_eq!(partials, expected);
+    let cpu = cache
+        .contract::<F, E, RING_D>(VARS, &source, &weights, None)
+        .unwrap();
+    match cpu {
+        Some(partials) => assert_eq!(partials, expected),
+        None => assert!(!available()),
+    }
+    #[cfg(akita_fold_metal)]
+    {
+        let gpu_cache = PackingStripes::new(&rings, POSITIONS).unwrap();
+        let words = std::sync::Arc::new(
+            jolt_field::CanonicalEncoding::canonical_u64_slice(&source)
+                .unwrap()
+                .to_vec(),
+        );
+        let poly = crate::DensePoly::from_shared_canonical_u64_prefix(VARS, words.clone()).unwrap();
+        let gpu_result = gpu_cache
+            .contract::<F, E, RING_D>(VARS, poly.field_coeffs(), &weights, Some(&words))
+            .unwrap();
+        assert_eq!(gpu_result, Some(expected));
+        let handle = gpu_cache.metal.get().unwrap().as_ref().unwrap().handle;
+        let owners = std::sync::Arc::strong_count(&words);
+        let row_weights: [[u64; 2]; 8] = std::array::from_fn(|r| [Q - 1 - r as u64, r as u64 + 7]);
+        let output = gpu_cache.weighted_rows(&words, &row_weights).unwrap();
+        for (i, actual) in output.iter().enumerate() {
+            let mut expected = [0u128; 2];
+            for (row, weight) in words.chunks_exact(output.len()).zip(row_weights) {
+                for (value, weight) in expected.iter_mut().zip(weight) {
+                    *value = (*value + u128::from(row[i]) * u128::from(weight) % u128::from(Q))
+                        % u128::from(Q);
+                }
+            }
+            assert_eq!(*actual, expected.map(|x| x as u64));
+        }
+        assert_eq!(
+            gpu_cache.metal.get().unwrap().as_ref().unwrap().handle,
+            handle
+        );
+        assert_eq!(std::sync::Arc::strong_count(&words), owners);
+        assert!(gpu_cache
+            .weighted_rows(&std::sync::Arc::new((*words).clone()), &row_weights)
+            .is_none());
+        assert!(
+            gpu_cache.metal.get().is_some_and(Option::is_some),
+            "expected a resident Metal key"
+        );
+    }
     assert!(cache
-        .contract::<F, E, RING_D>(VARS, &source[..source.len() - 1], &weights)
+        .contract::<F, E, RING_D>(VARS, &source[..source.len() - 1], &weights, None)
         .unwrap()
         .is_none());
     assert!(cache
-        .contract::<F, E, RING_D>(VARS - 1, &source, &weights)
+        .contract::<F, E, RING_D>(VARS - 1, &source, &weights, None)
         .is_err());
     assert!(PackingStripes::new(&rings[..rings.len() - 1], POSITIONS).is_none());
 }

@@ -22,6 +22,11 @@ pub(crate) mod extension_opening_reduction;
 pub(crate) mod field_reduction;
 #[cfg(test)]
 mod kernel_tests;
+#[cfg(akita_fold_metal)]
+pub(crate) mod metal_packed;
+#[cfg(all(akita_fold_metal, test))]
+#[path = "../../tests/unit/metal_recursive_commit.rs"]
+mod metal_packed_tests;
 mod prepared;
 #[cfg(test)]
 mod prepared_tests;

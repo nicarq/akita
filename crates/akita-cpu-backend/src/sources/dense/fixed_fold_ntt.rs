@@ -27,13 +27,34 @@ pub(super) struct FixedFoldNtt {
     positions: usize,
     live_rings: usize,
     blocks: usize,
+    #[cfg(akita_fold_metal)]
+    metal: std::sync::OnceLock<Option<MetalKey>>,
     // [position][digit][frequency][block][residue]
     spectra: Vec<[i32; STRIDE]>,
     twiddles: NttTwiddles<i32, SUBRING_D>,
     ntt: NttKernelPlan,
     dot: Dot,
-    #[cfg(akita_packing_sme)]
+    #[cfg(any(akita_packing_sme, akita_fold_metal))]
     pub(super) packing: Option<super::packing_sme::PackingStripes>,
+}
+
+#[cfg(akita_fold_metal)]
+struct MetalKey(std::ptr::NonNull<std::ffi::c_void>);
+#[cfg(akita_fold_metal)]
+// SAFETY: Metal buffers are thread safe and this retained key is read only.
+unsafe impl Send for MetalKey {}
+#[cfg(akita_fold_metal)]
+// SAFETY: All commands borrow the immutable key, and each has a distinct output.
+unsafe impl Sync for MetalKey {}
+#[cfg(akita_fold_metal)]
+impl Drop for MetalKey {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn akita_metal_fold_release(key: *mut std::ffi::c_void);
+        }
+        // SAFETY: The retained buffer is released once before its host storage drops.
+        unsafe { akita_metal_fold_release(self.0.as_ptr()) }
+    }
 }
 
 impl std::fmt::Debug for FixedFoldNtt {
@@ -109,13 +130,130 @@ impl FixedFoldNtt {
             positions,
             live_rings: rings.len(),
             blocks,
+            #[cfg(akita_fold_metal)]
+            metal: std::sync::OnceLock::new(),
             spectra,
             twiddles,
             ntt,
             dot,
-            #[cfg(akita_packing_sme)]
+            #[cfg(any(akita_packing_sme, akita_fold_metal))]
             packing: super::packing_sme::PackingStripes::new(rings, positions),
         })
+    }
+
+    #[cfg(akita_fold_metal)]
+    fn metal_fold<const D: usize>(
+        &self,
+        range: &Range<usize>,
+        weights: &[i32],
+        output: &mut [[i32; D]],
+    ) -> bool {
+        #[repr(C)]
+        struct Shape {
+            blocks: u32,
+            begin: u32,
+            end: u32,
+            rows: u32,
+            prime: [i32; 4],
+        }
+        unsafe extern "C" {
+            fn akita_metal_fold_key(
+                source: *const std::ffi::c_char,
+                keys: *const i32,
+                bytes: usize,
+            ) -> *mut std::ffi::c_void;
+            fn akita_metal_fold(
+                key: *mut std::ffi::c_void,
+                shape: *const Shape,
+                weights: *const i32,
+                tables: *const i32,
+                out: *mut i32,
+            ) -> i32;
+        }
+        let Ok(blocks) = u32::try_from(self.blocks) else {
+            return false;
+        };
+        let Ok(rows) = u32::try_from(output.len()) else {
+            return false;
+        };
+        if D != RING_D
+            || rows > u32::MAX / 4096
+            || blocks > u32::MAX / 128
+            || range.end > self.blocks
+            || range.start > range.end
+        {
+            return false;
+        }
+        let shape = Shape {
+            blocks,
+            begin: range.start as u32,
+            end: range.end as u32,
+            rows,
+            prime: [PRIME.p, PRIME.pinv, PRIME.mont, PRIME.montsq],
+        };
+        let tables = self
+            .twiddles
+            .negacyclic_tables()
+            .map(|table| table.map(MontCoeff::raw));
+        let weights: Vec<_> = weights
+            .iter()
+            .map(|&x| PRIME.from_canonical(x).raw())
+            .collect();
+        const SOURCE: &str = concat!(include_str!("fixed_fold.metal"), "\0");
+        let Some(key) = self.metal.get_or_init(|| {
+            // SAFETY: The key allocation is immutable and belongs to this struct for the handle's lifetime.
+            let handle = unsafe {
+                akita_metal_fold_key(
+                    SOURCE.as_ptr().cast(),
+                    self.spectra.as_ptr().cast(),
+                    std::mem::size_of_val(self.spectra.as_slice()),
+                )
+            };
+            std::ptr::NonNull::new(handle).map(MetalKey)
+        }) else {
+            return false;
+        };
+        // SAFETY: Each input is live until the synchronous dispatch completes. The output holds rows * D words and has an exclusive borrow.
+        unsafe {
+            akita_metal_fold(
+                key.0.as_ptr(),
+                &shape,
+                weights.as_ptr(),
+                tables.as_ptr().cast(),
+                output.as_mut_ptr().cast(),
+            ) != 0
+        }
+    }
+
+    fn fill_cpu<const D: usize>(
+        &self,
+        blocks: &Range<usize>,
+        spectrum_challenges: &[i32],
+        part: &mut [[i32; D]],
+    ) {
+        cfg_chunks_mut!(part, 1)
+            .enumerate()
+            .for_each(|(destination, row)| {
+                let mut spectrum = [[0i32; STRIDE]; SUBRING_D];
+                for (frequency, spectrum) in spectrum.iter_mut().enumerate() {
+                    let key = (destination * SUBRING_D + frequency) * self.blocks;
+                    let challenge = frequency * self.blocks;
+                    *spectrum = (self.dot)(
+                        &self.spectra[key + blocks.start..key + blocks.end],
+                        &spectrum_challenges[challenge + blocks.start..challenge + blocks.end],
+                    );
+                }
+                for residue in 0..STRIDE {
+                    let mut values: [MontCoeff<i32>; SUBRING_D] =
+                        std::array::from_fn(|frequency| {
+                            MontCoeff::from_raw(spectrum[frequency][residue])
+                        });
+                    inverse_ntt(&mut values, PRIME, &self.twiddles, self.ntt);
+                    for (i, value) in values.into_iter().enumerate() {
+                        row[0][i * STRIDE + residue] = PRIME.center(PRIME.to_canonical(value));
+                    }
+                }
+            });
     }
 
     pub(super) fn positions(&self) -> usize {
@@ -126,7 +264,10 @@ impl FixedFoldNtt {
         &self,
         challenges: &[SparseChallenge],
         chunks: &[Range<usize>],
+        metal_kernels: bool,
     ) -> Result<Option<Vec<Vec<[i32; D]>>>, AkitaError> {
+        #[cfg(not(akita_fold_metal))]
+        let _ = metal_kernels;
         if D != RING_D {
             return Ok(None);
         }
@@ -198,32 +339,16 @@ impl FixedFoldNtt {
         let mut rows = Vec::with_capacity(chunks.len());
         for blocks in active_chunks {
             let mut part = zero_vec(width, [0i32; D])?;
+            #[cfg(akita_fold_metal)]
+            if metal_kernels
+                && !blocks.is_empty()
+                && self.metal_fold(&blocks, &spectrum_challenges, &mut part)
+            {
+                rows.push(part);
+                continue;
+            }
             if !blocks.is_empty() {
-                cfg_chunks_mut!(part, 1)
-                    .enumerate()
-                    .for_each(|(destination, row)| {
-                        let mut spectrum = [[0i32; STRIDE]; SUBRING_D];
-                        for (frequency, spectrum) in spectrum.iter_mut().enumerate() {
-                            let key = (destination * SUBRING_D + frequency) * self.blocks;
-                            let challenge = frequency * self.blocks;
-                            *spectrum = (self.dot)(
-                                &self.spectra[key + blocks.start..key + blocks.end],
-                                &spectrum_challenges
-                                    [challenge + blocks.start..challenge + blocks.end],
-                            );
-                        }
-                        for residue in 0..STRIDE {
-                            let mut values: [MontCoeff<i32>; SUBRING_D] =
-                                std::array::from_fn(|frequency| {
-                                    MontCoeff::from_raw(spectrum[frequency][residue])
-                                });
-                            inverse_ntt(&mut values, PRIME, &self.twiddles, self.ntt);
-                            for (i, value) in values.into_iter().enumerate() {
-                                row[0][i * STRIDE + residue] =
-                                    PRIME.center(PRIME.to_canonical(value));
-                            }
-                        }
-                    });
+                self.fill_cpu(&blocks, &spectrum_challenges, &mut part);
             }
             rows.push(part);
         }
@@ -283,3 +408,7 @@ fn dot_neon(key: &[[i32; STRIDE]], challenge: &[i32]) -> [i32; STRIDE] {
         ((high * RADIX_MOD_P + (low % P as u64) as i64) % P) as i32
     })
 }
+
+#[cfg(all(test, akita_fold_metal))]
+#[path = "../../../tests/unit/metal_fixed_fold.rs"]
+mod metal_tests;

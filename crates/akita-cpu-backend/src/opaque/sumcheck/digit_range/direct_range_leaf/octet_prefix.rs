@@ -107,7 +107,7 @@ impl DigitWidth {
 /// octet `o` is the little-endian word of bytes `w o .. w (o + 1)`. Widths up
 /// to three bits look up each half of that word in a table of packed quad
 /// classes; wider digits are classified one at a time.
-struct OctetClassReader<'a> {
+pub(super) struct OctetClassReader<'a> {
     encoded: &'a [u8],
     width: DigitWidth,
     class_bits: usize,
@@ -115,7 +115,11 @@ struct OctetClassReader<'a> {
 }
 
 impl<'a> OctetClassReader<'a> {
-    fn new(source: &'a PackedSignedDigits, class_bits: usize, width: DigitWidth) -> Self {
+    pub(super) fn new(
+        source: &'a PackedSignedDigits,
+        class_bits: usize,
+        width: DigitWidth,
+    ) -> Self {
         let bit_width = usize::from(source.bit_width());
         let mut quad_classes = [0u8; 1 << 12];
         if bit_width <= 3 {
@@ -136,7 +140,7 @@ impl<'a> OctetClassReader<'a> {
     }
 
     /// Classes of `octets`; octets past the table have class zero.
-    fn classes(&self, octets: Range<usize>) -> Vec<u16> {
+    pub(super) fn classes(&self, octets: Range<usize>) -> Vec<u16> {
         match self.width {
             DigitWidth::W1 => self.classes_of_width::<1>(octets),
             DigitWidth::W2 => self.classes_of_width::<2>(octets),
@@ -692,11 +696,21 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
             DirectRangePrefixState::Round2 {
                 quad_values,
                 weights,
-            } => DirectRangePrefixState::Round3 {
-                octet_terms: octet_class_terms(&self.range_poly, &quad_values, r),
-                octet_pair_class_weights: weights.octet_pair_class_weights,
-                compact_pairs: weights.compact_pairs,
-            },
+            } => {
+                #[cfg(akita_fold_metal)]
+                if self.metal_kernels {
+                    if let Some(device) =
+                        metal::MetalQuartic::start(&source, &quad_values, r, &self.split_eq)
+                    {
+                        return LowBasisRangeImageStorage::Metal(device);
+                    }
+                }
+                DirectRangePrefixState::Round3 {
+                    octet_terms: octet_class_terms(&self.range_poly, &quad_values, r),
+                    octet_pair_class_weights: weights.octet_pair_class_weights,
+                    compact_pairs: weights.compact_pairs,
+                }
+            }
             DirectRangePrefixState::Round3 {
                 octet_terms,
                 compact_pairs,

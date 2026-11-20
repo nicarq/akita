@@ -87,13 +87,14 @@ impl<T> SetupPrefixCache<T> {
 /// ```
 pub struct CpuBackend<F: Field, E> {
     identity: Arc<BackendIdentity>,
-    prepared: Option<CpuPreparedSetup<F>>,
+    prepared: Option<Arc<CpuPreparedSetup<F>>>,
+    pub(crate) metal_kernels: bool,
     max_cached_ring_switch_elements: usize,
     /// One setup-prefix value is retained per slot for the life of this backend.
     /// Overlapping cold acquisitions may derive duplicate candidates without waiting.
-    pub(super) setup_prefix_cache: SetupPrefixCache<CachedSetupPrefix<F>>,
+    pub(super) setup_prefix_cache: Arc<SetupPrefixCache<CachedSetupPrefix<F>>>,
     // Scoped to this backend's setup seed. Only live, identical ring rows share storage.
-    pub(super) setup_prefix_inner_rows: InnerRowPool<F>,
+    pub(super) setup_prefix_inner_rows: Arc<InnerRowPool<F>>,
     extension: PhantomData<fn() -> E>,
 }
 
@@ -117,6 +118,18 @@ impl<F: Field, E> CpuBackend<F, E> {
         Self::with_ring_switch_cache_limit(expanded, Self::DEFAULT_MAX_CACHED_RING_SWITCH_ELEMENTS)
     }
 
+    pub fn with_metal_kernels(&self) -> Self {
+        Self {
+            identity: self.identity.clone(),
+            prepared: self.prepared.clone(),
+            metal_kernels: true,
+            max_cached_ring_switch_elements: self.max_cached_ring_switch_elements,
+            setup_prefix_cache: self.setup_prefix_cache.clone(),
+            setup_prefix_inner_rows: self.setup_prefix_inner_rows.clone(),
+            extension: PhantomData,
+        }
+    }
+
     /// Create a CPU backend with a ring-switch cache limit.
     ///
     /// Zero streams every supported operation; `usize::MAX` retains all of
@@ -136,10 +149,11 @@ impl<F: Field, E> CpuBackend<F, E> {
             .map_err(|error| AkitaError::InvalidSetup(error.to_string()))?;
         Ok(Self {
             identity: BackendIdentity::new(digest)?,
-            prepared: Some(CpuPreparedSetup::new(expanded)),
+            prepared: Some(Arc::new(CpuPreparedSetup::new(expanded))),
+            metal_kernels: false,
             max_cached_ring_switch_elements,
-            setup_prefix_cache: SetupPrefixCache::default(),
-            setup_prefix_inner_rows: InnerRowPool::default(),
+            setup_prefix_cache: Arc::default(),
+            setup_prefix_inner_rows: Arc::default(),
             extension: PhantomData,
         })
     }
@@ -173,7 +187,7 @@ impl<F: Field, E> CpuBackend<F, E> {
 
     pub(crate) fn prepared(&self) -> Result<&CpuPreparedSetup<F>, AkitaError> {
         self.prepared
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| AkitaError::Internal("cpu backend has no owned setup".into()))
     }
 
@@ -299,9 +313,10 @@ impl<F: Field, E> CpuBackend<F, E> {
         Ok(Self {
             identity: BackendIdentity::new([0; 32])?,
             prepared: None,
+            metal_kernels: false,
             max_cached_ring_switch_elements,
-            setup_prefix_cache: SetupPrefixCache::default(),
-            setup_prefix_inner_rows: InnerRowPool::default(),
+            setup_prefix_cache: Arc::default(),
+            setup_prefix_inner_rows: Arc::default(),
             extension: PhantomData,
         })
     }

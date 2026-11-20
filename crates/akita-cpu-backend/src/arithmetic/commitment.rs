@@ -473,6 +473,38 @@ impl<F: Field, E> CpuBackend<F, E> {
             log_basis: log_basis_inner,
         };
         if num_digits_inner == 1 {
+            #[cfg(akita_fold_metal)]
+            if self.metal_kernels
+                && n_rows == 2
+                && signed_digit_kernel == SignedDigitKernel::I8
+                && digits.bounds().fits_balanced_log_basis(log_basis_inner)
+                && D == 512
+                && row_width == 2048
+            {
+                let key = NttCacheKey::from_matrix_shape(
+                    D,
+                    n_rows,
+                    row_width,
+                    NttTransformDomain::Negacyclic,
+                )?;
+                if let Some(rows) = prepared.with_shared_ntt::<D, _>(key, |slot| {
+                    Ok(super::metal_packed::commit(
+                        slot,
+                        digits,
+                        row_width,
+                        num_live_blocks,
+                    ))
+                })? {
+                    tracing::debug!(
+                        blocks = num_live_blocks,
+                        rows = n_rows,
+                        cols = row_width,
+                        ring_degree = D,
+                        "completed Metal packed recursive commitment"
+                    );
+                    return Ok(rows);
+                }
+            }
             let policy = I8CommitPolicy::Recursive {
                 raw: !digits.bounds().fits_balanced_log_basis(log_basis_inner),
             };

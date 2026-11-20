@@ -39,6 +39,7 @@ where
         num_positions_per_block: usize,
         num_digits: usize,
         log_basis: u32,
+        metal_kernels: bool,
     ) -> Result<Vec<DecomposeFoldWitness>, AkitaError> {
         validate_digit_shape(num_digits, log_basis)?;
         if let Some(cache) = self.fixed_fold_ntt.as_ref().filter(|cache| {
@@ -46,7 +47,7 @@ where
                 && num_digits == fixed_fold_ntt::DIGITS
                 && log_basis == fixed_fold_ntt::LOG_BASIS
         }) {
-            if let Some(rows) = cache.fold::<D>(challenges, chunk_ranges)? {
+            if let Some(rows) = cache.fold::<D>(challenges, chunk_ranges, metal_kernels)? {
                 return Ok(rows
                     .into_iter()
                     .map(DecomposeFoldWitness::from_centered_rows)
@@ -165,6 +166,7 @@ where
         num_positions_per_block: usize,
         num_digits: usize,
         log_basis: u32,
+        metal_kernels: bool,
     ) -> Result<DecomposeFoldWitness, AkitaError> {
         self.decompose_fold_chunked::<D>(
             challenges,
@@ -172,6 +174,7 @@ where
             num_positions_per_block,
             num_digits,
             log_basis,
+            metal_kernels,
         )?
         .into_iter()
         .next()

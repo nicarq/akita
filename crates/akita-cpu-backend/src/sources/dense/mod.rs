@@ -6,7 +6,7 @@
 mod fixed_fold_ntt;
 mod kernels;
 mod ops;
-#[cfg(akita_packing_sme)]
+#[cfg(any(akita_packing_sme, akita_fold_metal))]
 mod packing_sme;
 mod poly;
 #[cfg(test)]

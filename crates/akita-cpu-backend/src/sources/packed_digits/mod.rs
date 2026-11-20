@@ -676,6 +676,15 @@ impl<'a> PackedSignedDigitView<'a> {
         }
     }
 
+    #[cfg(akita_fold_metal)]
+    pub(crate) fn three_bit_payload(self) -> Option<(usize, &'a [u8])> {
+        let stored = self.stored_len.saturating_sub(self.start).min(self.len);
+        if self.bit_width != 3 {
+            return None;
+        }
+        Some((stored, self.aligned_bytes(0..stored)?))
+    }
+
     pub(crate) fn aligned_bytes(self, range: Range<usize>) -> Option<&'a [u8]> {
         if range.start > range.end || range.end > self.len {
             return None;
