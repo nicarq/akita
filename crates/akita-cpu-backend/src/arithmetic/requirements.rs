@@ -16,7 +16,6 @@ pub(crate) enum NttOperationCluster {
     Commit,
     /// Ring-switch relation and quotient construction.
     RingSwitch,
-    WideCenteredQuotient,
 }
 
 /// One exact cache request routed to a fold-level operation cluster.
@@ -434,6 +433,21 @@ impl NttExecutionRequirements {
                 "ring-switch relation must retain at least one fold chunk".into(),
             ));
         }
+        let a_extent = matrix_extent(n_a, width_a)?;
+        for domain in [NttTransformDomain::Negacyclic, NttTransformDomain::Cyclic] {
+            self.add_matrix(
+                level,
+                NttOperationCluster::RingSwitch,
+                NttCacheKey::from_matrix_shape(d_a, n_a, width_a, domain)?,
+                a_extent,
+            )?;
+        }
+        self.add_matrix(
+            level,
+            NttOperationCluster::RingSwitch,
+            NttCacheKey::from_matrix_shape(d_b, n_b, width_b, NttTransformDomain::Cyclic)?,
+            matrix_extent(n_b, width_b)?,
+        )?;
         let (negative, positive) =
             akita_params::sis::balanced_digit_representable_bounds(log_basis_open, num_digits_fold);
         let rhs_abs_bound = negative
@@ -445,34 +459,10 @@ impl NttExecutionRequirements {
                     "aggregated folded-witness bound exceeds NTT capacity model".into(),
                 )
             })?;
-        let needs_tail = centered_quotient_requires_i16_tail(modulus_profile, d_a, rhs_abs_bound)?;
-        let a_cluster = if needs_tail
-            && modulus_profile == SisModulusProfileId::Q64Offset59
-            && streamable_quotient_shape(d_a, n_a, width_a)
-        {
-            NttOperationCluster::WideCenteredQuotient
-        } else {
-            NttOperationCluster::RingSwitch
-        };
-        let a_extent = matrix_extent(n_a, width_a)?;
-        for domain in [NttTransformDomain::Negacyclic, NttTransformDomain::Cyclic] {
+        if centered_quotient_requires_i16_tail(modulus_profile, d_a, rhs_abs_bound)? {
             self.add_matrix(
                 level,
-                a_cluster,
-                NttCacheKey::from_matrix_shape(d_a, n_a, width_a, domain)?,
-                a_extent,
-            )?;
-        }
-        self.add_matrix(
-            level,
-            NttOperationCluster::RingSwitch,
-            NttCacheKey::from_matrix_shape(d_b, n_b, width_b, NttTransformDomain::Cyclic)?,
-            matrix_extent(n_b, width_b)?,
-        )?;
-        if needs_tail {
-            self.add_matrix(
-                level,
-                a_cluster,
+                NttOperationCluster::RingSwitch,
                 NttCacheKey::from_matrix_shape(
                     d_a,
                     n_a,
@@ -568,10 +558,6 @@ pub(crate) fn warm_joined_ntt_requirements<
     Ok(())
 }
 
-pub(crate) fn streamable_quotient_shape(degree: usize, rows: usize, width: usize) -> bool {
-    degree == 2048 && rows == 1 && (1024..=4096).contains(&width) && width.is_multiple_of(4)
-}
-
 fn matrix_extent(num_rows: usize, active_width: usize) -> Result<usize, AkitaError> {
     num_rows
         .checked_mul(active_width)
@@ -618,7 +604,7 @@ pub(crate) fn signed_commit_domain(
 const fn cluster_order(cluster: NttOperationCluster) -> u8 {
     match cluster {
         NttOperationCluster::Commit => 0,
-        NttOperationCluster::RingSwitch | NttOperationCluster::WideCenteredQuotient => 3,
+        NttOperationCluster::RingSwitch => 3,
     }
 }
 

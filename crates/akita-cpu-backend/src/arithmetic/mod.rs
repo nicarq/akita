@@ -30,11 +30,6 @@ pub(crate) mod metal_packed;
 #[cfg(all(akita_fold_metal, test))]
 #[path = "../../tests/unit/metal_recursive_commit.rs"]
 mod metal_packed_tests;
-#[cfg(akita_fold_metal)]
-mod metal_quotient;
-#[cfg(all(akita_fold_metal, test))]
-#[path = "../../tests/unit/metal_quotient.rs"]
-mod metal_quotient_tests;
 mod prepared;
 #[cfg(test)]
 mod prepared_tests;
