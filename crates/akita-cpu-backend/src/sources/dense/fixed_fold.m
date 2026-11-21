@@ -21,6 +21,7 @@ static id<MTLBuffer> borrow_pages(id<MTLDevice> device, const void *data, size_t
 static id<MTLDevice> device;
 static id<MTLCommandQueue> queue;
 static id<MTLComputePipelineState> products, inverse, packedProducts, packedSums, lookupProducts, lookupSums;
+static id<MTLComputePipelineState> rawNtt;
 static void prepare(const char *source) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -38,6 +39,7 @@ static void prepare(const char *source) {
                                                          error:&error];
         inverse = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"fold_inverse"]
                                                         error:&error];
+        rawNtt = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"raw_ntt"] error:&error];
         packedProducts =
             [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"packed_commit_products"]
                                                   error:&error];
@@ -349,6 +351,55 @@ int akita_metal_lookup_commit(const char *source, const LookupShape *shape, cons
         if (command.status != MTLCommandBufferStatusCompleted)
             return 0;
         memcpy(out, result.contents, outputBytes);
+        return 1;
+    }
+}
+
+int akita_metal_raw_ntt(const char *shader, void *rawKey, const uint64_t *source, size_t sourceBytes,
+                        const FoldShape *shape, const int32_t *weights, const int32_t *tables, int32_t *out) {
+    @autoreleasepool {
+        prepare(shader);
+        if (!queue || rawNtt.threadExecutionWidth != 32 || rawNtt.maxTotalThreadsPerThreadgroup < 128 ||
+            shape->begin >= shape->end ||
+            shape->end > shape->blocks || !shape->rows || shape->rows % 4)
+            return 0;
+        const uint32_t positions = shape->rows / 4;
+        const size_t words = (size_t)shape->rows * 2048;
+        const size_t ringBytes = 2048 * sizeof(uint64_t);
+        const size_t rings = sourceBytes / ringBytes;
+        if (!rings || sourceBytes % ringBytes || (rings - 1) / positions + 1 != shape->blocks)
+            return 0;
+        const uint32_t lastPositions = (uint32_t)((rings - 1) % positions) + 1;
+        id<MTLBuffer> key = rawKey ? (__bridge id<MTLBuffer>)rawKey : borrow_pages(device, source, sourceBytes);
+        if (!key || key.length < sourceBytes)
+            return 0;
+        id<MTLBuffer> w = [device newBufferWithBytes:weights length:shape->blocks * 128UL * 4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> t = [device newBufferWithBytes:tables length:4 * 128 * 4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> output = borrow_pages(device, out, words * 4);
+        BOOL copyOutput = output == nil;
+        if (copyOutput)
+            output = [device newBufferWithLength:words * 4 options:MTLResourceStorageModeShared];
+        if (!w || !t || !output)
+            return 0;
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [command computeCommandEncoder];
+        if (!enc)
+            return 0;
+        [enc setComputePipelineState:rawNtt];
+        [enc setBuffer:key offset:0 atIndex:0];
+        [enc setBuffer:w offset:0 atIndex:1];
+        [enc setBuffer:t offset:0 atIndex:2];
+        [enc setBuffer:output offset:0 atIndex:3];
+        [enc setBytes:shape length:sizeof(FoldShape) atIndex:4];
+        [enc setBytes:&lastPositions length:sizeof(lastPositions) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake((size_t)positions * 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [enc endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted)
+            return 0;
+        if (copyOutput)
+            memcpy(out, output.contents, words * 4);
         return 1;
     }
 }

@@ -303,3 +303,83 @@ kernel void lookup_commit_sums(device const int *partials [[buffer(0)]], device 
         sum = akita::reduce_range(prime, sum + partials[tile_columns * stride + index]);
     sums[index] = sum;
 }
+
+inline int4 raw_mul(akita::NttPrime q, int4 a, int b) {
+    return int4(akita::mont_mul(q,a.x,b), akita::mont_mul(q,a.y,b), akita::mont_mul(q,a.z,b), akita::mont_mul(q,a.w,b));
+}
+
+inline int4 raw_reduce(akita::NttPrime q, int4 a) {
+    return int4(akita::reduce_range(q,a.x), akita::reduce_range(q,a.y), akita::reduce_range(q,a.z), akita::reduce_range(q,a.w));
+}
+
+inline int4 raw_digits(ulong a) {
+    ulong bias = a + 0x8000800080008000ul + ulong(a > 0x7fff7fff7fff7ffful) * 59ul;
+    return int4(uint(bias) & 65535u, uint(bias >> 16) & 65535u,
+                uint(bias >> 32) & 65535u, uint(bias >> 48)) - 32768;
+}
+
+kernel void raw_ntt(device const ulong *key [[buffer(0)]], device const int *weights [[buffer(1)]],
+                    device const int *tables [[buffer(2)]], device int *out [[buffer(3)]],
+                    constant FoldShape &shape [[buffer(4)]], constant uint &last_positions [[buffer(5)]],
+                    uint i [[thread_position_in_grid]],
+                    uint lane [[thread_index_in_simdgroup]]) {
+    const uint positions = shape.rows / 4, residue = (i >> 5) & 15;
+    const uint pos = i >> 9;
+    const uint end = shape.end - uint(shape.end == shape.blocks && pos >= last_positions);
+    int4 sum[4] = {};
+    int twist[4];
+    for (uint j=0; j<4; ++j)
+        twist[j]=akita::mont_mul(shape.prime,tables[256+lane+32*j],shape.prime.montsq);
+    for (uint b = shape.begin; b < end; ++b) {
+        int4 v[4];
+        for (uint j = 0; j < 4; ++j) {
+            uint ix = lane + 32*j;
+            ulong a = key[(ulong(b) * positions + pos) * 2048 + ix * 16 + residue];
+            v[j] = raw_mul(shape.prime, raw_digits(a), twist[j]);
+        }
+        for (uint j = 0; j < 2; ++j) {
+            int4 x=v[j], y=v[j+2];
+            v[j]=raw_reduce(shape.prime,x+y);
+            v[j+2]=raw_mul(shape.prime,x-y,tables[63+lane+32*j]);
+        }
+        for (uint j = 0; j < 4; j += 2) {
+            int4 x=v[j], y=v[j+1];
+            v[j]=raw_reduce(shape.prime,x+y);
+            v[j+1]=raw_mul(shape.prime,x-y,tables[31+lane]);
+        }
+        for (uint span = 16; span; span >>= 1) {
+            int tw=tables[span-1+(lane&(span-1))];
+            for (uint j=0; j<4; ++j) {
+                int4 other=simd_shuffle_xor(v[j],span);
+                v[j]=(lane & span) ? raw_mul(shape.prime,other-v[j],tw) : raw_reduce(shape.prime,v[j]+other);
+            }
+        }
+        for (uint j=0; j<4; ++j)
+            sum[j]=raw_reduce(shape.prime,sum[j]+raw_mul(shape.prime,v[j],weights[(lane+32*j)*shape.blocks+b]));
+    }
+
+    for (uint span=1; span<=16; span+=span) {
+        int tw=tables[128+span-1+(lane&(span-1))];
+        for (uint j=0; j<4; ++j) {
+            int4 mine=(lane&span)?raw_mul(shape.prime,sum[j],tw):sum[j];
+            int4 other=simd_shuffle_xor(mine,span);
+            sum[j]=raw_reduce(shape.prime,(lane&span)?(other-mine):(mine+other));
+        }
+    }
+    for (uint j=0; j<4; j+=2) {
+        int4 x=sum[j], y=raw_mul(shape.prime,sum[j+1],tables[128+31+lane]);
+        sum[j]=raw_reduce(shape.prime,x+y);
+        sum[j+1]=raw_reduce(shape.prime,x-y);
+    }
+    for (uint j=0; j<2; ++j) {
+        int4 x=sum[j], y=raw_mul(shape.prime,sum[j+2],tables[128+63+lane+32*j]);
+        sum[j]=raw_reduce(shape.prime,x+y);
+        sum[j+2]=raw_reduce(shape.prime,x-y);
+    }
+    for (uint j=0; j<4; ++j) {
+        int4 vals=raw_mul(shape.prime,sum[j],tables[384+lane+32*j]);
+        for (uint d=0; d<4; ++d) {
+            out[(pos*4+d)*2048 + (lane+32*j)*16 + residue] = akita::center(shape.prime,akita::to_canonical(shape.prime,vals[d]));
+        }
+    }
+}

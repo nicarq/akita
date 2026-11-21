@@ -47,7 +47,12 @@ where
                 && num_digits == fixed_fold_ntt::DIGITS
                 && log_basis == fixed_fold_ntt::LOG_BASIS
         }) {
-            if let Some(rows) = cache.fold::<D>(challenges, chunk_ranges, metal_kernels)? {
+            if let Some(rows) = cache.fold::<D>(
+                challenges,
+                chunk_ranges,
+                metal_kernels,
+                self.fold_words().as_ref(),
+            )? {
                 return Ok(rows
                     .into_iter()
                     .map(DecomposeFoldWitness::from_centered_rows)

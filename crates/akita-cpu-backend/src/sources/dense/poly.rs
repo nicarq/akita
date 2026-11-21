@@ -148,7 +148,6 @@ impl<F: Field> DensePoly<F> {
         }
     }
 
-    #[cfg(any(akita_packing_sme, akita_fold_metal))]
     pub(super) fn shared_words(&self) -> Option<&Arc<Vec<u64>>> {
         match &self.coeffs {
             DenseCoefficients::SharedCanonicalWords { words, .. } => Some(words),
@@ -272,13 +271,34 @@ impl<const P: u64> DensePoly<Fp64<P>> {
     }
 }
 
+pub(super) enum FoldWords<'a> {
+    Shared(&'a Arc<Vec<u64>>),
+    Borrowed(&'a [u64]),
+}
+
+impl<'a> FoldWords<'a> {
+    pub(super) fn as_slice(&self) -> &'a [u64] {
+        match self {
+            Self::Shared(words) => words.as_slice(),
+            Self::Borrowed(words) => words,
+        }
+    }
+}
+
 impl<F: Field + CanonicalEncoding> DensePoly<F> {
-    /// Prepare the coefficient spectra for repeated degree-2048 openings with
+    pub(super) fn fold_words(&self) -> Option<FoldWords<'_>> {
+        if F::CHALLENGE_SET_LIMBS != [u64::MAX - 58, 0, 0, 0] {
+            return None;
+        }
+        match self.shared_words() {
+            Some(owner) => Some(FoldWords::Shared(owner)),
+            None => F::canonical_u64_slice(self.field_coeffs()).map(FoldWords::Borrowed),
+        }
+    }
+
+    /// Prepare an immutable source for repeated degree-2048 openings with
     /// four balanced 16-bit digits and challenges embedded at stride 16.
-    ///
-    /// Use for immutable sources whose opening cost amortizes the spectrum
-    /// cache. The ordinary coefficient view remains available for commitments
-    /// and opening at other geometries.
+    /// Small sources cache their spectra. Large sources fold from coefficients.
     ///
     /// # Errors
     ///

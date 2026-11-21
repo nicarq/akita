@@ -1,5 +1,6 @@
 //! Frequency-major cache for an immutable source with a subring fold challenge.
 
+use super::poly::FoldWords;
 use crate::sources::poly_helpers::ValidatedSparseChallenges;
 use akita_algebra::ntt::butterfly::{forward_ntt, inverse_ntt};
 use akita_algebra::ntt::tables::Q64_PRIMES;
@@ -33,7 +34,7 @@ pub(super) struct FixedFoldNtt {
     #[cfg(akita_fold_metal)]
     metal: std::sync::OnceLock<Option<MetalKey>>,
     // [position][digit][frequency][block][residue]
-    spectra: Vec<u32>,
+    spectra: Option<Vec<u32>>,
     twiddles: NttTwiddles<i32, SUBRING_D>,
     ntt: NttKernelPlan,
     dot: Dot,
@@ -89,6 +90,38 @@ impl FixedFoldNtt {
             ));
         }
         let blocks = rings.len().div_ceil(positions);
+        let dot: Dot = dot_scalar;
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+        let dot = if akita_algebra::ntt::neon::use_neon_ntt() {
+            dot_neon
+        } else {
+            dot
+        };
+        let mut cache = Self {
+            positions,
+            live_rings: rings.len(),
+            blocks,
+            #[cfg(akita_fold_metal)]
+            metal: std::sync::OnceLock::new(),
+            spectra: None,
+            twiddles: NttTwiddles::compute(PRIME),
+            ntt: NttKernelPlan::detect::<i32>(),
+            dot,
+            #[cfg(any(akita_packing_sme, akita_fold_metal))]
+            packing: super::packing_sme::PackingStripes::new(rings, positions),
+        };
+        if rings.len() <= 1 << 15 {
+            cache.spectra = Some(cache.build_spectra(rings)?);
+        }
+        Ok(cache)
+    }
+
+    fn build_spectra<F: Field + CanonicalEncoding>(
+        &self,
+        rings: &[CyclotomicRing<F, RING_D>],
+    ) -> Result<Vec<u32>, AkitaError> {
+        let positions = self.positions;
+        let blocks = self.blocks;
         let spectra_len =
             checked::product([positions, DIGITS, SUBRING_D, blocks]).ok_or_else(|| {
                 AkitaError::InvalidInput("fixed fold NTT cache size overflows usize".into())
@@ -97,8 +130,6 @@ impl FixedFoldNtt {
             AkitaError::InvalidInput("fixed fold NTT cache size overflows usize".into())
         })?;
         let mut spectra = zero_vec(words, 0u32)?;
-        let ntt = NttKernelPlan::detect::<i32>();
-        let twiddles = NttTwiddles::compute(PRIME);
         let params = BalancedDecomposePow2Params::new(DIGITS, LOG_BASIS);
         if blocks != 0 {
             let (rows, _) = spectra.as_chunks_mut::<15>();
@@ -117,7 +148,7 @@ impl FixedFoldNtt {
                                         PRIME
                                             .from_canonical(i32::from(source[i * STRIDE + residue]))
                                     });
-                                forward_ntt(&mut transformed, PRIME, &twiddles, ntt);
+                                forward_ntt(&mut transformed, PRIME, &self.twiddles, self.ntt);
                                 for (frequency, value) in transformed.into_iter().enumerate() {
                                     packed::write(
                                         &mut spectra
@@ -131,34 +162,17 @@ impl FixedFoldNtt {
                     }
                 });
         }
-        let dot: Dot = dot_scalar;
-        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-        let dot = if akita_algebra::ntt::neon::use_neon_ntt() {
-            dot_neon
-        } else {
-            dot
-        };
-        Ok(Self {
-            positions,
-            live_rings: rings.len(),
-            blocks,
-            #[cfg(akita_fold_metal)]
-            metal: std::sync::OnceLock::new(),
-            spectra,
-            twiddles,
-            ntt,
-            dot,
-            #[cfg(any(akita_packing_sme, akita_fold_metal))]
-            packing: super::packing_sme::PackingStripes::new(rings, positions),
-        })
+        Ok(spectra)
     }
 
     #[cfg(akita_fold_metal)]
     fn metal_fold<const D: usize>(
         &self,
+        spectra: Option<&[u32]>,
         range: &Range<usize>,
         weights: &[i32],
         output: &mut [[i32; D]],
+        raw_words: Option<&FoldWords<'_>>,
     ) -> bool {
         #[repr(C)]
         struct Shape {
@@ -174,6 +188,16 @@ impl FixedFoldNtt {
                 keys: *const i32,
                 bytes: usize,
             ) -> *mut std::ffi::c_void;
+            fn akita_metal_raw_ntt(
+                source: *const std::ffi::c_char,
+                key: *mut std::ffi::c_void,
+                words: *const u64,
+                bytes: usize,
+                shape: *const Shape,
+                weights: *const i32,
+                tables: *const i32,
+                out: *mut i32,
+            ) -> i32;
             fn akita_metal_fold(
                 key: *mut std::ffi::c_void,
                 shape: *const Shape,
@@ -212,13 +236,44 @@ impl FixedFoldNtt {
             .map(|&x| PRIME.from_canonical(x).raw())
             .collect();
         const SOURCE: &str = concat!(include_str!("fixed_fold.metal"), "\0");
+        let Some(spectra) = spectra else {
+            let Some(raw) = raw_words else {
+                return false;
+            };
+            let Some(words) = self
+                .live_rings
+                .checked_mul(RING_D)
+                .and_then(|n| raw.as_slice().get(..n))
+            else {
+                return false;
+            };
+            let registered = match raw {
+                FoldWords::Shared(owner) => {
+                    self.packing.as_ref().and_then(|pack| pack.metal_key(owner))
+                }
+                FoldWords::Borrowed(_) => None,
+            };
+            // SAFETY: The live canonical prefix is borrowed until the synchronous command completes.
+            return unsafe {
+                akita_metal_raw_ntt(
+                    SOURCE.as_ptr().cast(),
+                    registered.map_or(std::ptr::null_mut(), |key| key.handle.as_ptr()),
+                    words.as_ptr(),
+                    std::mem::size_of_val(words),
+                    &shape,
+                    weights.as_ptr(),
+                    tables.as_ptr().cast(),
+                    output.as_mut_ptr().cast(),
+                ) != 0
+            };
+        };
         let Some(key) = self.metal.get_or_init(|| {
             // SAFETY: The key allocation is immutable and belongs to this struct for the handle's lifetime.
             let handle = unsafe {
                 akita_metal_fold_key(
                     SOURCE.as_ptr().cast(),
-                    self.spectra.as_ptr().cast(),
-                    std::mem::size_of_val(self.spectra.as_slice()),
+                    spectra.as_ptr().cast(),
+                    std::mem::size_of_val(spectra),
                 )
             };
             std::ptr::NonNull::new(handle).map(MetalKey)
@@ -239,11 +294,12 @@ impl FixedFoldNtt {
 
     fn fill_cpu<const D: usize>(
         &self,
+        spectra: &[u32],
         blocks: &Range<usize>,
         spectrum_challenges: &[i32],
         part: &mut [[i32; D]],
     ) {
-        let (spectra, _) = self.spectra.as_chunks::<15>();
+        let (spectra, _) = spectra.as_chunks::<15>();
         cfg_chunks_mut!(part, 1)
             .enumerate()
             .for_each(|(destination, row)| {
@@ -278,10 +334,17 @@ impl FixedFoldNtt {
         challenges: &[SparseChallenge],
         chunks: &[Range<usize>],
         metal_kernels: bool,
+        raw_words: Option<&FoldWords<'_>>,
     ) -> Result<Option<Vec<Vec<[i32; D]>>>, AkitaError> {
         #[cfg(not(akita_fold_metal))]
-        let _ = metal_kernels;
-        if D != RING_D {
+        let _ = (metal_kernels, raw_words);
+        let spectra = self.spectra.as_deref();
+        if D != RING_D
+            || (spectra.is_none()
+                && (!cfg!(akita_fold_metal)
+                    || !metal_kernels
+                    || raw_words.is_none_or(|raw| raw.as_slice().is_empty())))
+        {
             return Ok(None);
         }
         let active = self.blocks.min(challenges.len());
@@ -355,13 +418,16 @@ impl FixedFoldNtt {
             #[cfg(akita_fold_metal)]
             if metal_kernels
                 && !blocks.is_empty()
-                && self.metal_fold(&blocks, &spectrum_challenges, &mut part)
+                && self.metal_fold(spectra, &blocks, &spectrum_challenges, &mut part, raw_words)
             {
                 rows.push(part);
                 continue;
             }
             if !blocks.is_empty() {
-                self.fill_cpu(&blocks, &spectrum_challenges, &mut part);
+                let Some(spectra) = spectra else {
+                    return Ok(None);
+                };
+                self.fill_cpu(spectra, &blocks, &spectrum_challenges, &mut part);
             }
             rows.push(part);
         }
@@ -425,6 +491,14 @@ fn dot_neon(key: &[PackedSpectrum], challenge: &[i32]) -> [i32; STRIDE] {
 #[path = "../../../tests/unit/packed_spectrum.rs"]
 mod packing_tests;
 
+#[cfg(test)]
+#[path = "../../../tests/unit/cpu_fixed_fold.rs"]
+mod cpu_tests;
+
 #[cfg(all(test, akita_fold_metal))]
 #[path = "../../../tests/unit/metal_fixed_fold.rs"]
 mod metal_tests;
+
+#[cfg(all(test, akita_fold_metal))]
+#[path = "../../../tests/unit/metal_key_layout.rs"]
+mod metal_key_layout_tests;
