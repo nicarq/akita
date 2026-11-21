@@ -61,6 +61,7 @@ fn metal_subring_fold_matches_cpu() {
 fn raw_metal_subring_fold_matches_precomputed_spectra() {
     use super::super::poly::DensePoly;
     use jolt_field::Fp64;
+    use std::slice::from_ref;
     use std::sync::Arc;
 
     const Q: u64 = u64::MAX - 58;
@@ -80,8 +81,8 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
             })
             .collect(),
     );
-    let source =
-        DensePoly::<Fp64<Q>>::from_shared_canonical_u64_prefix(23, Arc::clone(&words)).unwrap();
+    let source = DensePoly::<Fp64<Q>>::from_shared_canonical_u64_prefix(23, words).unwrap();
+    let words = source.fold_words().unwrap();
     let mut cache =
         FixedFoldNtt::new(source.nonzero_ring_coeffs::<RING_D>().unwrap(), positions).unwrap();
     let weights: Vec<_> = (0..SUBRING_D * blocks)
@@ -123,15 +124,22 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
         .unwrap()
         .is_none());
     assert!(cache
-        .fold::<RING_D>(&challenges, &[0..challenges.len() + 1], true, Some(&words))
+        .fold::<RING_D>(
+            &challenges,
+            from_ref(&(0..challenges.len() + 1)),
+            true,
+            Some(&words)
+        )
         .unwrap()
         .is_none());
+    let block = 0..1;
+    let first_block = from_ref(&block);
     let unsupported = SparseChallenge {
         positions: vec![1].into(),
         coeffs: vec![1].into(),
     };
     assert!(cache
-        .fold::<RING_D>(&[unsupported], &[0..1], true, Some(&words))
+        .fold::<RING_D>(&[unsupported], first_block, true, Some(&words))
         .unwrap()
         .is_none());
     let excessive = SparseChallenge {
@@ -139,7 +147,7 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
         coeffs: vec![-128; 513].into(),
     };
     assert!(cache
-        .fold::<RING_D>(&[excessive], &[0..1], true, Some(&words))
+        .fold::<RING_D>(&[excessive], first_block, true, Some(&words))
         .unwrap()
         .is_none());
     let malformed = SparseChallenge {
@@ -147,7 +155,7 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
         coeffs: vec![1].into(),
     };
     assert!(cache
-        .fold::<RING_D>(&[malformed], &[0..1], true, Some(&words))
+        .fold::<RING_D>(&[malformed], first_block, true, Some(&words))
         .is_err());
     assert!(cache.spectra.is_none());
     let mut source = source;

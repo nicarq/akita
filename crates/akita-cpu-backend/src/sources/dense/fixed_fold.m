@@ -355,24 +355,31 @@ int akita_metal_lookup_commit(const char *source, const LookupShape *shape, cons
     }
 }
 
-int akita_metal_raw_ntt(const char *shader, void *rawKey, const FoldShape *shape, const int32_t *weights,
-                        const int32_t *tables, int32_t *out) {
+int akita_metal_raw_ntt(const char *shader, void *rawKey, const uint64_t *source, size_t sourceBytes,
+                        const FoldShape *shape, const int32_t *weights, const int32_t *tables, int32_t *out) {
     @autoreleasepool {
         prepare(shader);
         if (!queue || rawNtt.threadExecutionWidth != 32 || rawNtt.maxTotalThreadsPerThreadgroup < 128 ||
             shape->begin >= shape->end ||
-            shape->end > shape->blocks || shape->rows < 256 || shape->rows > 4096 || shape->rows % 4)
+            shape->end > shape->blocks || !shape->rows || shape->rows % 4)
             return 0;
         const uint32_t positions = shape->rows / 4;
         const size_t words = (size_t)shape->rows * 2048;
-        id<MTLBuffer> key = (__bridge id<MTLBuffer>)rawKey;
+        const size_t ringBytes = 2048 * sizeof(uint64_t);
+        const size_t rings = sourceBytes / ringBytes;
+        if (!rings || sourceBytes % ringBytes || (rings - 1) / positions + 1 != shape->blocks)
+            return 0;
+        const uint32_t lastPositions = (uint32_t)((rings - 1) % positions) + 1;
+        id<MTLBuffer> key = rawKey ? (__bridge id<MTLBuffer>)rawKey : borrow_pages(device, source, sourceBytes);
+        if (!key || key.length < sourceBytes)
+            return 0;
         id<MTLBuffer> w = [device newBufferWithBytes:weights length:shape->blocks * 128UL * 4 options:MTLResourceStorageModeShared];
         id<MTLBuffer> t = [device newBufferWithBytes:tables length:4 * 128 * 4 options:MTLResourceStorageModeShared];
         id<MTLBuffer> output = borrow_pages(device, out, words * 4);
         BOOL copyOutput = output == nil;
         if (copyOutput)
             output = [device newBufferWithLength:words * 4 options:MTLResourceStorageModeShared];
-        if (!w || !t || !output || key.length < (size_t)shape->end * positions * 2048 * 8)
+        if (!w || !t || !output)
             return 0;
         id<MTLCommandBuffer> command = [queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [command computeCommandEncoder];
@@ -384,6 +391,7 @@ int akita_metal_raw_ntt(const char *shader, void *rawKey, const FoldShape *shape
         [enc setBuffer:t offset:0 atIndex:2];
         [enc setBuffer:output offset:0 atIndex:3];
         [enc setBytes:shape length:sizeof(FoldShape) atIndex:4];
+        [enc setBytes:&lastPositions length:sizeof(lastPositions) atIndex:5];
         [enc dispatchThreadgroups:MTLSizeMake((size_t)positions * 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         [enc endEncoding];
         [command commit];

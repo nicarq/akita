@@ -1,5 +1,6 @@
 //! Frequency-major cache for an immutable source with a subring fold challenge.
 
+use super::poly::FoldWords;
 use crate::sources::poly_helpers::ValidatedSparseChallenges;
 use akita_algebra::ntt::butterfly::{forward_ntt, inverse_ntt};
 use akita_algebra::ntt::tables::Q64_PRIMES;
@@ -171,7 +172,7 @@ impl FixedFoldNtt {
         range: &Range<usize>,
         weights: &[i32],
         output: &mut [[i32; D]],
-        raw_words: Option<&std::sync::Arc<Vec<u64>>>,
+        raw_words: Option<&FoldWords<'_>>,
     ) -> bool {
         #[repr(C)]
         struct Shape {
@@ -190,6 +191,8 @@ impl FixedFoldNtt {
             fn akita_metal_raw_ntt(
                 source: *const std::ffi::c_char,
                 key: *mut std::ffi::c_void,
+                words: *const u64,
+                bytes: usize,
                 shape: *const Shape,
                 weights: *const i32,
                 tables: *const i32,
@@ -234,19 +237,29 @@ impl FixedFoldNtt {
             .collect();
         const SOURCE: &str = concat!(include_str!("fixed_fold.metal"), "\0");
         let Some(spectra) = spectra else {
-            let Some(key) = self
-                .packing
-                .as_ref()
-                .zip(raw_words)
-                .and_then(|(pack, words)| pack.metal_key(words))
+            let Some(raw) = raw_words else {
+                return false;
+            };
+            let Some(words) = self
+                .live_rings
+                .checked_mul(RING_D)
+                .and_then(|n| raw.as_slice().get(..n))
             else {
                 return false;
             };
-            // SAFETY: Packing validated the canonical key geometry. All buffers are live through the synchronous call.
+            let registered = match raw {
+                FoldWords::Shared(owner) => {
+                    self.packing.as_ref().and_then(|pack| pack.metal_key(owner))
+                }
+                FoldWords::Borrowed(_) => None,
+            };
+            // SAFETY: The live canonical prefix is borrowed until the synchronous command completes.
             return unsafe {
                 akita_metal_raw_ntt(
                     SOURCE.as_ptr().cast(),
-                    key.handle.as_ptr(),
+                    registered.map_or(std::ptr::null_mut(), |key| key.handle.as_ptr()),
+                    words.as_ptr(),
+                    std::mem::size_of_val(words),
                     &shape,
                     weights.as_ptr(),
                     tables.as_ptr().cast(),
@@ -321,14 +334,16 @@ impl FixedFoldNtt {
         challenges: &[SparseChallenge],
         chunks: &[Range<usize>],
         metal_kernels: bool,
-        raw_words: Option<&std::sync::Arc<Vec<u64>>>,
+        raw_words: Option<&FoldWords<'_>>,
     ) -> Result<Option<Vec<Vec<[i32; D]>>>, AkitaError> {
         #[cfg(not(akita_fold_metal))]
         let _ = (metal_kernels, raw_words);
         let spectra = self.spectra.as_deref();
         if D != RING_D
             || (spectra.is_none()
-                && (!cfg!(akita_fold_metal) || !metal_kernels || raw_words.is_none()))
+                && (!cfg!(akita_fold_metal)
+                    || !metal_kernels
+                    || raw_words.is_none_or(|raw| raw.as_slice().is_empty())))
         {
             return Ok(None);
         }
@@ -483,3 +498,7 @@ mod cpu_tests;
 #[cfg(all(test, akita_fold_metal))]
 #[path = "../../../tests/unit/metal_fixed_fold.rs"]
 mod metal_tests;
+
+#[cfg(all(test, akita_fold_metal))]
+#[path = "../../../tests/unit/metal_key_layout.rs"]
+mod metal_key_layout_tests;

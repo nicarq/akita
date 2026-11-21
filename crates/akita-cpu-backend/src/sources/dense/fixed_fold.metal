@@ -320,15 +320,17 @@ inline int4 raw_digits(ulong a) {
 
 kernel void raw_ntt(device const ulong *key [[buffer(0)]], device const int *weights [[buffer(1)]],
                     device const int *tables [[buffer(2)]], device int *out [[buffer(3)]],
-                    constant FoldShape &shape [[buffer(4)]], uint i [[thread_position_in_grid]],
+                    constant FoldShape &shape [[buffer(4)]], constant uint &last_positions [[buffer(5)]],
+                    uint i [[thread_position_in_grid]],
                     uint lane [[thread_index_in_simdgroup]]) {
     const uint positions = shape.rows / 4, residue = (i >> 5) & 15;
-    const uint pos = i >> 9, first = shape.begin;
+    const uint pos = i >> 9;
+    const uint end = shape.end - uint(shape.end == shape.blocks && pos >= last_positions);
     int4 sum[4] = {};
     int twist[4];
     for (uint j=0; j<4; ++j)
         twist[j]=akita::mont_mul(shape.prime,tables[256+lane+32*j],shape.prime.montsq);
-    for (uint b = first; b < shape.end; ++b) {
+    for (uint b = shape.begin; b < end; ++b) {
         int4 v[4];
         for (uint j = 0; j < 4; ++j) {
             uint ix = lane + 32*j;
