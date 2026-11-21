@@ -47,9 +47,6 @@ where
                 && num_digits == fixed_fold_ntt::DIGITS
                 && log_basis == fixed_fold_ntt::LOG_BASIS
         }) {
-            if !metal_kernels && D == fixed_fold_ntt::RING_D {
-                cache.ensure_spectra(self.nonzero_ring_coeffs::<{ fixed_fold_ntt::RING_D }>()?)?;
-            }
             if let Some(rows) =
                 cache.fold::<D>(challenges, chunk_ranges, metal_kernels, self.shared_words())?
             {

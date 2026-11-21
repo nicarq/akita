@@ -21,7 +21,7 @@ fn metal_subring_fold_matches_cpu() {
         positions,
         blocks,
         live_rings: positions * blocks,
-        spectra: std::sync::OnceLock::from(Ok(spectra)),
+        spectra: Some(spectra),
         metal: std::sync::OnceLock::new(),
         ntt: NttKernelPlan::detect::<i32>(),
         twiddles: NttTwiddles::compute(PRIME),
@@ -36,7 +36,7 @@ fn metal_subring_fold_matches_cpu() {
         for _ in 0..5 {
             let start = Instant::now();
             cache.fill_cpu(
-                cache.spectra.get().unwrap().as_ref().unwrap(),
+                cache.spectra.as_deref().unwrap(),
                 &range,
                 &weights,
                 &mut cpu,
@@ -44,7 +44,7 @@ fn metal_subring_fold_matches_cpu() {
             let cpu_us = start.elapsed().as_micros();
             let start = Instant::now();
             assert!(cache.metal_fold(
-                Some(cache.spectra.get().unwrap().as_ref().unwrap()),
+                cache.spectra.as_deref(),
                 &range,
                 &weights,
                 &mut actual,
@@ -91,7 +91,7 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
         let mut cpu = vec![[0; RING_D]; positions * DIGITS];
         let mut actual = cpu.clone();
         cache.fill_cpu(
-            cache.spectra.get().unwrap().as_ref().unwrap(),
+            cache.spectra.as_deref().unwrap(),
             &range,
             &weights,
             &mut cpu,
@@ -117,7 +117,7 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
         .unwrap()
         .unwrap();
     assert!(actual == expected);
-    assert!(cache.spectra.get().is_none());
+    assert!(cache.spectra.is_none());
     assert!(cache
         .fold::<RING_D>(&challenges, &chunks, true, None)
         .unwrap()
@@ -149,7 +149,7 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
     assert!(cache
         .fold::<RING_D>(&[malformed], &[0..1], true, Some(&words))
         .is_err());
-    assert!(cache.spectra.get().is_none());
+    assert!(cache.spectra.is_none());
     let mut source = source;
     source.fixed_fold_ntt = Some(Arc::new(cache));
     let cpu_rows = source
@@ -158,12 +158,5 @@ fn raw_metal_subring_fold_matches_precomputed_spectra() {
     for (row, expected) in cpu_rows.into_iter().zip(expected) {
         assert!(row.into_centered_coeffs_flat() == expected.into_flattened());
     }
-    assert!(source
-        .fixed_fold_ntt
-        .as_ref()
-        .unwrap()
-        .spectra
-        .get()
-        .unwrap()
-        .is_ok());
+    assert!(source.fixed_fold_ntt.as_ref().unwrap().spectra.is_none());
 }

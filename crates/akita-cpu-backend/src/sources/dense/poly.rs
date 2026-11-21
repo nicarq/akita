@@ -272,12 +272,9 @@ impl<const P: u64> DensePoly<Fp64<P>> {
 }
 
 impl<F: Field + CanonicalEncoding> DensePoly<F> {
-    /// Prepare the coefficient spectra for repeated degree-2048 openings with
+    /// Prepare an immutable source for repeated degree-2048 openings with
     /// four balanced 16-bit digits and challenges embedded at stride 16.
-    ///
-    /// Use for immutable sources whose opening cost amortizes the spectrum
-    /// cache. The ordinary coefficient view remains available for commitments
-    /// and opening at other geometries.
+    /// Small sources cache their spectra. Large sources fold from coefficients.
     ///
     /// # Errors
     ///

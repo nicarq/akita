@@ -33,7 +33,7 @@ pub(super) struct FixedFoldNtt {
     #[cfg(akita_fold_metal)]
     metal: std::sync::OnceLock<Option<MetalKey>>,
     // [position][digit][frequency][block][residue]
-    spectra: std::sync::OnceLock<Result<Vec<u32>, AkitaError>>,
+    spectra: Option<Vec<u32>>,
     twiddles: NttTwiddles<i32, SUBRING_D>,
     ntt: NttKernelPlan,
     dot: Dot,
@@ -96,34 +96,23 @@ impl FixedFoldNtt {
         } else {
             dot
         };
-        let cache = Self {
+        let mut cache = Self {
             positions,
             live_rings: rings.len(),
             blocks,
             #[cfg(akita_fold_metal)]
             metal: std::sync::OnceLock::new(),
-            spectra: std::sync::OnceLock::new(),
+            spectra: None,
             twiddles: NttTwiddles::compute(PRIME),
             ntt: NttKernelPlan::detect::<i32>(),
             dot,
             #[cfg(any(akita_packing_sme, akita_fold_metal))]
             packing: super::packing_sme::PackingStripes::new(rings, positions),
         };
-        if !cfg!(akita_fold_metal) || (rings.len() <= 1 << 15) {
-            cache.ensure_spectra(rings)?;
+        if rings.len() <= 1 << 15 {
+            cache.spectra = Some(cache.build_spectra(rings)?);
         }
         Ok(cache)
-    }
-
-    pub(super) fn ensure_spectra<F: Field + CanonicalEncoding>(
-        &self,
-        rings: &[CyclotomicRing<F, RING_D>],
-    ) -> Result<(), AkitaError> {
-        self.spectra
-            .get_or_init(|| self.build_spectra(rings))
-            .as_ref()
-            .map(|_| ())
-            .map_err(Clone::clone)
     }
 
     fn build_spectra<F: Field + CanonicalEncoding>(
@@ -336,11 +325,7 @@ impl FixedFoldNtt {
     ) -> Result<Option<Vec<Vec<[i32; D]>>>, AkitaError> {
         #[cfg(not(akita_fold_metal))]
         let _ = (metal_kernels, raw_words);
-        let spectra = self
-            .spectra
-            .get()
-            .and_then(|result| result.as_ref().ok())
-            .map(Vec::as_slice);
+        let spectra = self.spectra.as_deref();
         if D != RING_D
             || (spectra.is_none()
                 && (!cfg!(akita_fold_metal) || !metal_kernels || raw_words.is_none()))
@@ -490,6 +475,10 @@ fn dot_neon(key: &[PackedSpectrum], challenge: &[i32]) -> [i32; STRIDE] {
 #[cfg(test)]
 #[path = "../../../tests/unit/packed_spectrum.rs"]
 mod packing_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/cpu_fixed_fold.rs"]
+mod cpu_tests;
 
 #[cfg(all(test, akita_fold_metal))]
 #[path = "../../../tests/unit/metal_fixed_fold.rs"]
