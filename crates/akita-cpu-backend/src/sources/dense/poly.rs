@@ -148,7 +148,6 @@ impl<F: Field> DensePoly<F> {
         }
     }
 
-    #[cfg(any(akita_packing_sme, akita_fold_metal))]
     pub(super) fn shared_words(&self) -> Option<&Arc<Vec<u64>>> {
         match &self.coeffs {
             DenseCoefficients::SharedCanonicalWords { words, .. } => Some(words),

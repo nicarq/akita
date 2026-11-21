@@ -76,8 +76,8 @@ pub(super) struct PackingStripes {
 }
 
 #[cfg(akita_fold_metal)]
-struct PackingKey {
-    handle: std::ptr::NonNull<std::ffi::c_void>,
+pub(super) struct PackingKey {
+    pub(super) handle: std::ptr::NonNull<std::ffi::c_void>,
     owner: std::sync::Arc<Vec<u64>>,
 }
 #[cfg(akita_fold_metal)]
@@ -125,7 +125,7 @@ impl PackingStripes {
     }
 
     #[cfg(akita_fold_metal)]
-    fn metal_key(&self, owner: &std::sync::Arc<Vec<u64>>) -> Option<&PackingKey> {
+    pub(super) fn metal_key(&self, owner: &std::sync::Arc<Vec<u64>>) -> Option<&PackingKey> {
         if self.source_words > owner.len() {
             return None;
         }
