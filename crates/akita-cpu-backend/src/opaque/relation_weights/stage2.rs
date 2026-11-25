@@ -225,6 +225,7 @@ where
                 opening_source_len: request.opening_source_len,
                 opening_ring_dim: request.opening_ring_dimension,
                 relation_plan: request.relation_plan,
+                packing_events: plan.packing_events(),
                 packing_semantics: match plan.linear_terms() {
                     akita_prover::backend::Stage2OpeningDescription::CoefficientPacking {
                         semantics,

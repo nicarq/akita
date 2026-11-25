@@ -169,6 +169,12 @@ impl RingRelationProver {
             + akita_serialization::AkitaSerialize,
         B: crate::backend::ProverBackend<F, PointF>,
     {
+        let mut measured_at = std::time::Instant::now();
+        let mut lap = |stage: &str| {
+            let now = std::time::Instant::now();
+            if std::env::var_os("PGL_AKITA_PROFILE").is_some() { eprintln!("RELATION_LAP level={level} stage={stage} us={}", now.duration_since(measured_at).as_micros()); }
+            measured_at = now;
+        };
         let consumer = opening_ctx.backend();
         let prepared_opening_handles = prepared_group_openings
             .into_iter()
@@ -265,6 +271,7 @@ impl RingRelationProver {
             opening_payload.coeffs(),
         )?;
         drop(opening_rows_span);
+        lap("rows");
 
         // Public claim batching is intentionally delayed until every
         // opening digit has been bound through the complete D/H payload above.
@@ -337,6 +344,7 @@ impl RingRelationProver {
             None,
         )?;
         drop(_grind_span);
+        lap("fold_probe");
         if grind_outputs.len() != num_groups {
             return Err(AkitaError::Internal(
                 "fold grind output count differs from opening group count".into(),
@@ -455,6 +463,7 @@ impl RingRelationProver {
                 &witness_plan,
             )?;
         drop(fold_grind_span);
+        lap("finish");
 
         let manifest = crate::backend::RecursiveWitnessHandle::manifest(&witness_handle);
         if manifest.logical_len() != expected_witness_len

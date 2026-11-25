@@ -500,6 +500,7 @@ pub(super) fn prove_stage2<F, E, B>(
     binary_batching: E,
     physical_l2: Option<PhysicalL2ProverReplay<E>>,
     linear_terms: Stage2OpeningDescription<'_, E>,
+    packing_events: Option<Vec<Vec<akita_types::RelationWeightEvent<E>>>>,
     trace_opening_claim: E,
     plan: &RelationRangeImagePlan,
     relation: crate::backend::RelationWeightRequest<'_, F, E>,
@@ -526,7 +527,7 @@ where
     }
     let domain_len = domain.domain_len();
     let physical_l2_claim = physical_l2.as_ref().map_or_else(E::zero, |norm| norm.claim);
-    let relation_plan = crate::backend::ValidatedRelationSessionPlan::new(
+    let mut relation_plan = crate::backend::ValidatedRelationSessionPlan::new(
         batching_coeff,
         stage1_point,
         range_image_evaluation,
@@ -550,6 +551,9 @@ where
             }),
         binary_batching,
     );
+    relation_plan.packing_events = packing_events;
+    let profile = std::env::var_os("PGL_BUILD_LAPS").is_some();
+    let clock = std::time::Instant::now();
     let mut session_handle = crate::backend::OpaqueStage2Kernel::begin_stage2(
         ctx.backend(),
         rs.relation_handle,
@@ -572,6 +576,7 @@ where
             "stage 2 backend round count or input claim differs from relation plan".into(),
         ));
     }
+    let setup_time = clock.elapsed();
     let mut kernel = Stage2Sumcheck::<F, E, B> {
         backend: ctx.backend(),
         session: &mut session_handle,
@@ -591,6 +596,7 @@ where
         akita_sumcheck::SumcheckShape::new(num_rounds, 3)?,
         0,
     )?;
+    if profile { eprintln!("AKITA_STAGE2 level={level} prepare_us={} rounds_us={}", setup_time.as_micros(), (clock.elapsed()-setup_time).as_micros()); }
     let final_output =
         crate::backend::OpaqueStage2Kernel::finish_stage2(ctx.backend(), session_handle)?;
     if claim != final_output.final_claim() {

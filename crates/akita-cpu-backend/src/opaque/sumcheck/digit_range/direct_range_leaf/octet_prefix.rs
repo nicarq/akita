@@ -109,6 +109,7 @@ impl DigitWidth {
 /// classes; wider digits are classified one at a time.
 pub(super) struct OctetClassReader<'a> {
     encoded: &'a [u8],
+    full_tiles: usize,
     width: DigitWidth,
     class_bits: usize,
     quad_classes: [u8; 1 << 12],
@@ -133,10 +134,53 @@ impl<'a> OctetClassReader<'a> {
         }
         Self {
             encoded: source.encoded_bytes(),
+            full_tiles: source.len() / (16 * HISTOGRAM_TILE_PAIRS),
             width,
             class_bits,
             quad_classes,
         }
+    }
+
+    fn is_zero_range_tile(&self, tile: usize) -> bool {
+        if tile >= self.full_tiles {
+            return false;
+        }
+        match self.width {
+            DigitWidth::W1 => true,
+            DigitWidth::W2 => self.tile_has_only_zero_or_minus_one::<2>(tile),
+            DigitWidth::W3 => self.tile_has_only_zero_or_minus_one::<3>(tile),
+            DigitWidth::W4 => self.tile_has_only_zero_or_minus_one::<4>(tile),
+            DigitWidth::W5 => self.tile_has_only_zero_or_minus_one::<5>(tile),
+            DigitWidth::W6 => self.tile_has_only_zero_or_minus_one::<6>(tile),
+            DigitWidth::W7 => self.tile_has_only_zero_or_minus_one::<7>(tile),
+            DigitWidth::W8 => self.tile_has_only_zero_or_minus_one::<8>(tile),
+        }
+    }
+
+    fn tile_has_only_zero_or_minus_one<const W: usize>(&self, tile: usize) -> bool {
+        let interior_digit_bits = const {
+            let mut masks = [0u64; W];
+            let mut bit = 0;
+            while bit < W * 64 {
+                if bit % W != 0 {
+                    masks[bit / 64] |= 1 << (bit % 64);
+                }
+                bit += 1;
+            }
+            masks
+        };
+        let tile_bytes = 2 * HISTOGRAM_TILE_PAIRS * W;
+        let bytes = &self.encoded[tile * tile_bytes..(tile + 1) * tile_bytes];
+        bytes.chunks_exact(8 * W).all(|block| {
+            let mut carry = 0;
+            let mut changes_within_digits = 0;
+            for (word, mask) in block.as_chunks::<8>().0.iter().zip(interior_digit_bits) {
+                let word = u64::from_le_bytes(*word);
+                changes_within_digits |= (word ^ ((word << 1) | carry)) & mask;
+                carry = word >> 63;
+            }
+            changes_within_digits == 0
+        })
     }
 
     /// Classes of `octets`; octets past the table have class zero.
@@ -328,6 +372,7 @@ fn octet_pair_class_weights<E: Field>(
     let first_bits = e_first.len().trailing_zeros();
     let tiles = live_pairs.div_ceil(HISTOGRAM_TILE_PAIRS);
     let task_plan = histogram_task_plan::<E>(tiles, num_classes, parallel_tasks(1));
+    let skip_zero_tiles = std::env::var_os("PGL_ZERO_RANGE_TILES").is_some();
     let can_use_joint = reader.class_bits == 2 && e_first.len() >= 256;
     let mut tables: Vec<_> = cfg_into_iter!(0..task_plan.task_count)
         .map(|task| {
@@ -338,9 +383,18 @@ fn octet_pair_class_weights<E: Field>(
                 covered_tiles: Vec::new(),
                 zero_pages: Vec::new(),
             };
+            let mut skipped = 0usize;
             for tile in tiles {
                 let start = tile * HISTOGRAM_TILE_PAIRS;
                 let end = (start + HISTOGRAM_TILE_PAIRS).min(live_pairs);
+                if skip_zero_tiles && end - start == HISTOGRAM_TILE_PAIRS && reader.is_zero_range_tile(tile) {
+                    skipped += 1;
+                    joint.zero_pages.push(u8::MAX);
+                    if can_use_joint {
+                        joint.covered_tiles.push(true);
+                    }
+                    continue;
+                }
                 let classes = reader.classes(2 * start..2 * end);
                 let pairs = classes.as_chunks::<2>().0;
                 let mut zero_bits = 0_u8;
@@ -382,25 +436,29 @@ fn octet_pair_class_weights<E: Field>(
                     }
                 }
             }
-            (weights, joint)
+            (weights, joint, skipped)
         })
         .collect();
-    let Some(((totals, _), rest)) = tables.split_first_mut() else {
+    if skip_zero_tiles {
+        let skipped = tables.iter().map(|(_, _, n)| n).sum::<usize>();
+        eprintln!("AKITA_ZERO_RANGE_TILES skipped={skipped} tiles={tiles}");
+    }
+    let Some(((totals, _, _), rest)) = tables.split_first_mut() else {
         return (vec![[E::zero(); 2]; num_classes], None);
     };
     cfg_chunks_mut!(totals, HISTOGRAM_MERGE_CLASSES)
         .enumerate()
         .for_each(|(chunk, totals)| {
             let first = chunk * HISTOGRAM_MERGE_CLASSES;
-            for (table, _) in rest.iter() {
+            for (table, _, _) in rest.iter() {
                 for (total, weight) in totals.iter_mut().zip(&table[first..]) {
                     total[0] += weight[0];
                     total[1] += weight[1];
                 }
             }
         });
-    let (totals, mut initial) = tables.remove(0);
-    for (_, mut task) in tables {
+    let (totals, mut initial, _) = tables.remove(0);
+    for (_, mut task, _) in tables {
         initial.covered_tiles.append(&mut task.covered_tiles);
         initial.zero_pages.append(&mut task.zero_pages);
         add_assign_all(&mut initial.weights, &task.weights);
@@ -780,6 +838,28 @@ impl<E: Field + Ring + Unreduced> LowBasisRangeCheckProver<E> {
 mod histogram_tests {
     use super::*;
     use jolt_field::{Prime128Offset275, Prime32Offset99};
+
+    #[test]
+    fn zero_range_tiles_match_decoded_digits_across_word_and_tile_boundaries() {
+        let tile_size = 16 * HISTOGRAM_TILE_PAIRS;
+        for width in 1..=8 {
+            let mut digits: Vec<i8> = (0..3 * tile_size - 1)
+                .map(|i| -(((i ^ (i >> 2)) & 1) as i8))
+                .collect();
+            if width > 1 {
+                digits[tile_size] = 1;
+                digits[tile_size + 64 / width as usize] = -2;
+            }
+            let packed = PackedSignedDigits::from_i8_digits(digits, width).unwrap();
+            let reader = OctetClassReader::new(&packed, 2, DigitWidth::new(width).unwrap());
+            for tile in 0..2 {
+                let start = tile * tile_size / 8;
+                let decoded = reader.classes(start..start + tile_size / 8);
+                assert_eq!(reader.is_zero_range_tile(tile), decoded.iter().all(|&class| class == 0));
+            }
+            assert!(!reader.is_zero_range_tile(2));
+        }
+    }
 
     #[test]
     fn prefix_constructor_rejects_short_equality_point() {

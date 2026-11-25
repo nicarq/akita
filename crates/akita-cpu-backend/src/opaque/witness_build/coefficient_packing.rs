@@ -46,6 +46,11 @@ pub(crate) fn fold_coefficient_packing_group<F: Field + jolt_field::Ring>(
     let expected_coordinates = expected_challenges
         .checked_mul(geometry.partial_base_field_width())
         .ok_or_else(|| AkitaError::InvalidInput("packing partial length overflow".into()))?;
+    if let [partial] = partials_by_claim {
+        if std::env::var_os("PGL_SPLIT_PACKING_FOLD").is_some() {
+            return fold_coefficient_packing_partials(geometry, challenges.as_slice(), partial.coordinates());
+        }
+    }
     let mut coordinates = Vec::new();
     coordinates
         .try_reserve_exact(expected_coordinates)

@@ -124,6 +124,7 @@ fn portable_fragments_match_complete_cpu_witness_in_both_modes() {
                 RingRelationMode::ReducedEvaluation => RelationDQuotientWitness::ReducedEvaluation,
             };
             let full = cpu_recursive_witness_build(
+            None,
                 &instance,
                 RingRelationWitness::from_groups(
                     vec![reduced_group_witness(&params, ctx)],

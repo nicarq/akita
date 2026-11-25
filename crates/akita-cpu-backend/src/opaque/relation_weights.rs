@@ -64,6 +64,7 @@ pub(crate) struct RelationLaneWeightInputs<'a, F: Field, E: Field> {
     pub opening_ring_dim: usize,
     pub relation_plan: &'a RelationRangeImagePlan,
     pub packing_semantics: Option<&'a CoefficientPackingBatchSemantics<'a, E>>,
+    pub packing_events: Option<&'a [Vec<akita_types::RelationWeightEvent<E>>]>,
 }
 
 mod lane_weights;
@@ -184,6 +185,7 @@ fn pack_relation_events<F, E>(
     num_groups: usize,
     packing_required: bool,
     packing_semantics: Option<&CoefficientPackingBatchSemantics<'_, E>>,
+    packing_events: Option<&[Vec<akita_types::RelationWeightEvent<E>>]>,
     live_coeff_len: usize,
     relation_coefficient_block_len: usize,
 ) -> Result<Vec<Option<usize>>, AkitaError>
@@ -198,7 +200,7 @@ where
         ));
     }
     if let Some(batch) = packing_semantics {
-        for group in batch.groups() {
+        for (index, group) in batch.groups().iter().enumerate() {
             if group.physical_field_len() != live_coeff_len
                 || group.relation_coefficient_block_len() != relation_coefficient_block_len
                 || weights.alpha_powers().get(..group.alpha_powers().len())
@@ -220,7 +222,11 @@ where
                     "packing relation group appears more than once".into(),
                 ));
             }
-            weights.extend_events(coefficient_packing_relation_events::<F, E>(group)?)?;
+            if let Some(events) = packing_events {
+                weights.extend_events(events[index].iter().cloned())?;
+            } else {
+                weights.extend_events(coefficient_packing_relation_events::<F, E>(group)?)?;
+            }
         }
     }
     Ok(packing_a_ring_dims)
@@ -298,6 +304,7 @@ where
         opening_batch.num_groups(),
         packing_required,
         packing_semantics,
+        inputs.packing_events,
         compilation.witness_layout.live_coeff_len(),
         relation_coefficient_block_len,
     )?;
@@ -340,12 +347,26 @@ where
                 .ok_or_else(|| {
                     AkitaError::Internal("relation challenge lane count overflow".into())
                 })?;
+            #[cfg(feature="parallel")]
+            let parallel=total_blocks>=256 && std::env::var_os("PGL_PAR_RELATION_WEIGHTS").is_some();
+            #[cfg(not(feature="parallel"))]
+            let parallel=false;
+            if parallel {
+                let mut lanes=vec![E::zero();lane_count];
+                cfg_chunks_mut!(&mut lanes, lane_alpha_powers.len()).enumerate().try_for_each(|(index,row)| {
+                    let evaluation=challenges.eval_at_pows::<F,E>(index,&group_alpha_pows_a)?;
+                    for (dst,&power) in row.iter_mut().zip(&lane_alpha_powers){ *dst=evaluation*power; }
+                    Ok::<_,AkitaError>(())
+                })?;
+                lanes
+            } else {
             let mut lanes = Vec::with_capacity(lane_count);
             for index in 0..total_blocks {
                 let evaluation = challenges.eval_at_pows::<F, E>(index, &group_alpha_pows_a)?;
                 lanes.extend(lane_alpha_powers.iter().map(|&power| evaluation * power));
             }
             lanes
+            }
         };
         let d_setup_accs = if let Some(setup) = compilation.setup_sources.as_ref() {
             let _span = tracing::info_span!("relation_weight_d_setup_columns").entered();
@@ -356,7 +377,7 @@ where
                 1,
                 1,
                 |coefficients| {
-                    Ok(vec![MulBaseUnreduced::dot_base(
+                    Ok([MulBaseUnreduced::dot_base(
                         &group_alpha_pows_d,
                         coefficients,
                     )])
@@ -374,7 +395,7 @@ where
                 group_plan.witness.slice_count,
                 1,
                 |coefficients| {
-                    Ok(vec![MulBaseUnreduced::dot_base(
+                    Ok([MulBaseUnreduced::dot_base(
                         &group_alpha_pows_b,
                         coefficients,
                     )])
@@ -411,9 +432,21 @@ where
         // contribution. A is already digit-domain, so the A-row setup term does
         // not multiply by G_commit.
         let opening_evaluations = if let Some(point) = ring_multiplier_point {
+            let positions=group_plan.witness.num_positions;
+            if positions>=256 && std::env::var_os("PGL_PAR_RELATION_WEIGHTS").is_some() {
+                let mut values=vec![E::zero();positions];
+                cfg_chunks_mut!(&mut values, 64).enumerate().try_for_each(|(block,items)| {
+                    for (slot,item) in items.iter_mut().enumerate() {
+                        *item=point.eval_position_at::<E>(64*block+slot,&group_alpha_pows_a)?;
+                    }
+                    Ok::<_,AkitaError>(())
+                })?;
+                values
+            } else {
             (0..group_plan.witness.num_positions)
                 .map(|position| point.eval_position_at::<E>(position, &group_alpha_pows_a))
                 .collect::<Result<Vec<_>, _>>()?
+            }
         } else {
             vec![E::zero(); group_plan.witness.num_positions]
         };
@@ -426,7 +459,7 @@ where
                     1,
                     1,
                     |coefficients| {
-                        Ok(vec![MulBaseUnreduced::dot_base(
+                        Ok([MulBaseUnreduced::dot_base(
                             &group_alpha_pows_a,
                             coefficients,
                         )])

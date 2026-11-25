@@ -213,13 +213,28 @@ impl<'a> CpuRecursiveWitnessUnitPlan<'a> {
     }
 }
 
+pub(crate) enum RecombinedRows<F: Field> {
+    Single(crate::opaque::OpaqueInnerRelationState<F>),
+    Joined(RingVec<F>),
+}
+
+impl<F: Field> core::ops::Deref for RecombinedRows<F> {
+    type Target = RingVec<F>;
+    fn deref(&self) -> &RingVec<F> {
+        match self {
+            Self::Single(source) => &source.rows()[0],
+            Self::Joined(rows) => rows,
+        }
+    }
+}
+
 pub(crate) struct PreparedRingSwitchGroup<F: Field + CanonicalEncoding> {
     pub(crate) params: akita_params::GroupOpenPhaseParams,
     pub(crate) role_dims: CommitmentRingDims,
     pub(crate) e_hat: DigitBlocks,
     pub(crate) t_hat: DigitBlocks,
     /// Block-major native-A rows: `[block][A row][coefficient]`.
-    pub(crate) recomposed_inner_rows: RingVec<F>,
+    pub(crate) recomposed_inner_rows: RecombinedRows<F>,
     pub(crate) folded_opening: GroupFoldedOpening<F>,
     pub(crate) fold: crate::opaque::CpuAcceptedFold<F>,
 }
@@ -457,6 +472,7 @@ fn build_witness_unit<F: Field + CanonicalEncoding>(
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 pub(crate) fn cpu_recursive_witness_build<F, O, B>(
+    shared_layout: Option<&WitnessLayout>,
     instance: &RingRelationInstance<F>,
     witness: RingRelationWitness<F>,
     opening_ctx: &OperationCtx<'_, F, O>,
@@ -472,6 +488,15 @@ where
         + crate::opaque::FoldHandleBackend<F, AcceptedFold = crate::opaque::CpuAcceptedFold<F>>,
     B: RuntimeRingSwitchProveBackend<F>,
 {
+    let profile = std::env::var_os("PGL_BUILD_LAPS").is_some();
+    let mut clock = std::time::Instant::now();
+    let mut lap = |stage: &str, group: usize| {
+        if profile {
+            let now = std::time::Instant::now();
+            eprintln!("AKITA_BUILD groups={} stage={stage} group={group} us={}", instance.opening_batch().num_groups(), now.duration_since(clock).as_micros());
+            clock = now;
+        }
+    };
     let opening_batch = instance.opening_batch();
     validate_i8_setup_log_basis(
         lp.open().digits.log_basis,
@@ -577,6 +602,10 @@ where
             .ok_or_else(|| {
                 AkitaError::Internal("commitment hint coefficient count overflow".into())
             })?;
+        lap("t_digits", group_index);
+        let recomposed_inner_rows = if polynomial_count == 1 && std::env::var_os("PGL_KEEP_INNER_ROWS").is_some() {
+            RecombinedRows::Single(inner_relation)
+        } else {
         let mut inner_rows = inner_rows_by_polynomial.iter();
         let mut inner_coefficients = inner_rows
             .next()
@@ -591,8 +620,9 @@ where
         for rows in inner_rows {
             inner_coefficients.extend_from_slice(rows.coeffs());
         }
-        let recomposed_inner_rows =
-            RingVec::from_coeffs_with_ring_dim(inner_coefficients, group_dims.d_a())?;
+        RecombinedRows::Joined(RingVec::from_coeffs_with_ring_dim(inner_coefficients, group_dims.d_a())?)
+        };
+        lap("recompose", group_index);
         owned.push(PreparedRingSwitchGroup {
             params: group_lp,
             role_dims: group_dims,
@@ -618,12 +648,17 @@ where
             )?;
         }
     }
-    let witness_layout = instance.segment_layout(lp, None)?;
+    let owned_layout;
+    let witness_layout = match shared_layout {
+        Some(layout) => layout,
+        None => { owned_layout=instance.segment_layout(lp,None)?; &owned_layout }
+    };
 
     // Relation quotient `r`: each group owns a native consistency/A/B
     // block, while the level owns the shared D tail. One trailing witness
     // segment carries all quotient rows in canonical relation order.
-    let tail = match (lp.ring_relation_mode, d_quotients) {
+    let make_tail = || -> Result<_, AkitaError> {
+        let value = match (lp.ring_relation_mode, d_quotients) {
         (
             akita_params::RingRelationMode::QuotientLift,
             RelationDQuotientWitness::QuotientLift(d_quotients),
@@ -649,7 +684,8 @@ where
             ))
         }
     };
-
+        Ok(value)
+    };
     // Every segment of the generated witness is balanced, but grouped roots
     // may mix decomposition bases. Z and the quotient tail use the opening
     // basis, E uses the opening basis, and T uses the outer basis. The inner
@@ -660,6 +696,7 @@ where
     let packed_width = u8::try_from(known_balanced_log_basis).map_err(|_| {
         AkitaError::Internal("recursive witness basis does not fit i8 storage".into())
     })?;
+    let emit_units = || -> Result<_, AkitaError> {
     let mut out = {
         let _span = tracing::info_span!("ring_switch_allocate_output").entered();
         CpuRecursiveWitnessBuilder::new(witness_layout.live_coeff_len(), packed_width)?
@@ -681,6 +718,18 @@ where
             witness_layout.num_chunks_for_group(group_index),
         )?;
     }
+        Ok(out)
+    };
+    #[cfg(feature = "parallel")]
+    let (tail, out) = if opening_batch.num_groups() > 1 && std::env::var_os("PGL_OVERLAP_QUOTIENT").is_some() {
+        rayon::join(make_tail, emit_units)
+    } else {
+        (make_tail(), emit_units())
+    };
+    #[cfg(not(feature = "parallel"))]
+    let (tail, out) = (make_tail(), emit_units());
+    let (tail, mut out) = (tail?, out?);
+    lap("quotient_and_units", 0);
     {
         let _span = tracing::info_span!("ring_switch_emit_tail").entered();
         match tail {
@@ -705,6 +754,7 @@ where
         )));
     }
     let out = out.finish()?;
+    lap("tail", 0);
     #[cfg(test)]
     let out = super::alignment_gap_tests::fill_alignment_gaps(out, &witness_layout)?;
     #[cfg(feature = "response-model-diagnostics")]

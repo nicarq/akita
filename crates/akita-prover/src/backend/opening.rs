@@ -33,6 +33,10 @@ pub trait OpaqueOpeningKernel<F: Field + CanonicalEncoding, E: Field>:
         session: &Self::ProofSessionHandle,
         requests: &[GroupOpeningRequest<'_, E, Self::CommitmentHandle, Self::WitnessHandle>],
     ) -> Result<Vec<PreparedGroupOpening<E, Self::PreparedOpeningHandle>>, AkitaError>;
+    fn probe_opening_batch(&self, jobs: &[(ProofContext, &Self::PreparedOpeningHandle, crate::backend::ValidatedFoldProbePlan<'_>)])
+        -> Result<Vec<FoldProbeOutcome<Self::AcceptedFoldHandle>>, AkitaError> {
+        jobs.iter().map(|(ctx, source, plan)| self.probe_opening_fold(ctx, source, plan)).collect()
+    }
     fn probe_opening_fold(
         &self,
         context: &ProofContext,

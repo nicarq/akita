@@ -25,13 +25,13 @@ impl<F: Field> SetupRows<'_, F> {
     }
 }
 
-pub(super) fn contract_setup_columns<F, E>(
+pub(super) fn contract_setup_columns<F, E, C: AsRef<[E]>>(
     family: &SetupRows<'_, F>,
     columns: Range<usize>,
     row_weights: &[(usize, Vec<E>)],
     batch_count: usize,
     value_width: usize,
-    contract: impl Fn(&[F]) -> Result<Vec<E>, AkitaError> + Sync,
+    contract: impl Fn(&[F]) -> Result<C, AkitaError> + Sync,
 ) -> Result<SetupColumnValues<E>, AkitaError>
 where
     F: Field,
@@ -63,6 +63,7 @@ where
             })?;
             for (row, weights) in row_weights {
                 let contracted = contract(family.ring_slice(*row, column)?)?;
+                let contracted=contracted.as_ref();
                 if contracted.len() != value_width {
                     return Err(AkitaError::Internal(
                         "setup column contraction width mismatch".into(),
@@ -79,7 +80,7 @@ where
                                 "setup contraction batch has no output destination".into(),
                             )
                         })?;
-                    for (accumulator, &value) in destination.iter_mut().zip(&contracted) {
+                    for (accumulator, &value) in destination.iter_mut().zip(contracted) {
                         *accumulator += weight * value;
                     }
                 }

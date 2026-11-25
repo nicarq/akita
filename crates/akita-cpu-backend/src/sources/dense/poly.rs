@@ -173,6 +173,15 @@ impl<F: Field> DensePoly<F> {
         }
     }
 
+    pub fn metal_weighted_rows_into(&self, weights:&[[u64;2]], output:&mut [[u64;2]])->bool{
+        #[cfg(akita_fold_metal)]
+        if let (Some(packing),Some(words))=(self.fixed_fold_ntt.as_ref().and_then(|n|n.packing.as_ref()),self.shared_words()){
+            return packing.weighted_rows_into(words,weights,output);
+        }
+        let _=(weights,output);
+        false
+    }
+
     pub(crate) const fn nonzero_coeff_len(&self) -> usize {
         self.nonzero_coeff_len
     }

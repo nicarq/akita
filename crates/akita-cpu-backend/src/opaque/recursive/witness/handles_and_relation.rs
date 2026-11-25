@@ -252,6 +252,7 @@ impl CpuWitnessHandle {
 
     pub(crate) fn initialize_relation_plan<F>(
         &mut self,
+        shared_layout: Option<akita_params::WitnessLayout>,
         relation: &akita_types::RingRelationInstance<F>,
         level: &akita_params::CommittedGroupParams,
     ) -> Result<(), AkitaError>
@@ -264,7 +265,7 @@ impl CpuWitnessHandle {
             ));
         }
         let opening_batch = relation.opening_batch();
-        let witness_layout = relation.segment_layout(level, None)?;
+        let witness_layout = match shared_layout {Some(layout)=>layout, None=>relation.segment_layout(level,None)?};
         if witness_layout.live_coeff_len() != self.manifest.logical_len() {
             return Err(AkitaError::Internal(
                 "recursive witness manifest disagrees with its relation instance".into(),

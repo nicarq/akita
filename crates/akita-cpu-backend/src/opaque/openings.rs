@@ -42,9 +42,7 @@ where
         session: &Self::ProofSessionHandle,
         requests: &[GroupOpeningRequest<'_, E, Self::CommitmentHandle, Self::WitnessHandle>],
     ) -> Result<Vec<PreparedGroupOpening<E, Self::PreparedOpeningHandle>>, AkitaError> {
-        requests
-            .iter()
-            .map(|request| {
+        let prepare = |request: &GroupOpeningRequest<'_, E, Self::CommitmentHandle, Self::WitnessHandle>| {
                 let context = &request.context;
                 let source = request.source;
                 let plan = &request.plan;
@@ -159,8 +157,22 @@ where
                     opening
                 };
                 Ok(PreparedGroupOpening::new(messages, opening))
-            })
-            .collect()
+            };
+        #[cfg(feature = "parallel")]
+        if requests.len() > 1 && std::env::var_os("PGL_PAR_AKITA_GROUPS").is_some() {
+            use rayon::prelude::*;
+            return requests.par_iter().map(prepare).collect();
+        }
+        requests.iter().map(prepare).collect()
+    }
+    fn probe_opening_batch(&self, jobs: &[(ProofContext, &Self::PreparedOpeningHandle, ValidatedFoldProbePlan<'_>)])
+        -> Result<Vec<FoldProbeOutcome<Self::AcceptedFoldHandle>>, AkitaError> {
+        #[cfg(feature="parallel")]
+        if jobs.len()>1 && std::env::var_os("PGL_PAR_AKITA_PROBES").is_some() {
+            use rayon::prelude::*;
+            return jobs.par_iter().map(|(ctx, source, plan)| self.probe_opening_fold(ctx, source, plan)).collect();
+        }
+        jobs.iter().map(|(ctx, source, plan)| self.probe_opening_fold(ctx, source, plan)).collect()
     }
     fn probe_opening_fold(
         &self,

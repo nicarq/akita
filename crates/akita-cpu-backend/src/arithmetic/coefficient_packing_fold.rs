@@ -463,6 +463,19 @@ fn accumulate_small_signed_product<F: Field + Ring>(
     }
 }
 
+fn add_weighted_slice<F: Field + Ring>(dest: &mut [F], source: &[F], weight: i8) {
+    match weight {
+        1 => dest.iter_mut().zip(source).for_each(|(d, &x)| *d += x),
+        -1 => dest.iter_mut().zip(source).for_each(|(d, &x)| *d -= x),
+        2 => dest.iter_mut().zip(source).for_each(|(d, &x)| *d += x + x),
+        -2 => dest.iter_mut().zip(source).for_each(|(d, &x)| *d -= x + x),
+        _ => {
+            let scale = F::from_i64(i64::from(weight));
+            dest.iter_mut().zip(source).for_each(|(d, &x)| *d += x * scale);
+        }
+    }
+}
+
 /// Fold coefficient packing partials by sparse subring challenges.
 ///
 /// `partial_coordinates` uses
@@ -501,6 +514,26 @@ pub(crate) fn fold_coefficient_packing_partials<F: Field + Ring>(
     )?;
     let mut quotient = zero_vec::<F>("packing quotient", geometry.partial_base_field_width())?;
     let s = geometry.challenge_subring_dimension();
+    if std::env::var_os("PGL_SPLIT_PACKING_FOLD").is_some() {
+        for (challenge, coordinates) in challenges.iter().zip(partial_coordinates.chunks_exact(geometry.partial_base_field_width())) {
+            for ((plane, low), high) in coordinates.chunks_exact(s).zip(reduced.chunks_exact_mut(s)).zip(quotient.chunks_exact_mut(s)) {
+                for (&position, &weight) in challenge.positions.iter().zip(&challenge.coeffs) {
+                    let position = position as usize;
+                    let (before_wrap, after_wrap) = plane.split_at(s - position);
+                    add_weighted_slice(&mut low[position..], before_wrap, weight);
+                    add_weighted_slice(&mut high[..position], after_wrap, weight);
+                }
+            }
+        }
+        for (low, &high) in reduced.iter_mut().zip(&quotient) {
+            *low -= high;
+        }
+        return Ok(CoefficientPackingFoldProduct {
+            geometry,
+            reduced_base_field_coordinates: reduced,
+            quotient_high_half_base_field_coordinates: quotient,
+        });
+    }
     for (term_index, challenge) in challenges.iter().enumerate() {
         let partial_offset = term_index
             .checked_mul(geometry.partial_base_field_width())

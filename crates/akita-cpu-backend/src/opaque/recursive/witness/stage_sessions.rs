@@ -351,8 +351,18 @@ where
                 "Stage 2 plan disagrees with its witness manifest".into(),
             ));
         }
+        let mut clock=std::time::Instant::now();
+        let level=plan.witness_len();
+        let mut lap=|name:&str| {
+            let now=std::time::Instant::now();
+            if std::env::var_os("PGL_STAGE2_DETAIL").is_some() {
+                eprintln!("AKITA_INPUT level={level} stage={name} us={}",(now-clock).as_micros());
+            }
+            clock=now;
+        };
         let weights =
             crate::opaque::relation_weights::compile_stage2_weights(&prepared.expanded, &plan)?;
+        lap("weights");
         let additional = (!weights.linear.is_empty() || !weights.binary_intervals.is_empty())
             .then(|| {
                 relation_range_image::AdditionalRelationTerms::new(
@@ -365,6 +375,7 @@ where
                 )
             })
             .transpose()?;
+        lap("additional");
         let relation_linear_claim =
             plan.relation_claim() + plan.physical_l2_claim() + plan.linear_opening_claim();
         let relation_weights = match weights.ordinary {
@@ -435,6 +446,7 @@ where
                 )?,
             )?;
         }
+        lap("linear_terms");
         let prover = relation_range_image::RelationRangeImageProver::new(
             batching_coefficient,
             witness.packed,
@@ -450,6 +462,7 @@ where
             additional,
             metal_kernels,
         )?;
+        lap("prefix");
         let claim = akita_sumcheck::SumcheckInstanceProver::input_claim(&prover);
         Ok(Self {
             binding: witness.binding.for_operation(0),

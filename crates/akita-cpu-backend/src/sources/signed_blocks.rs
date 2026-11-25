@@ -480,6 +480,13 @@ where
     fn num_rings(&self) -> usize {
         self.num_rings
     }
+    fn stored_fold_rings(&self) -> usize {
+        if std::env::var_os("PGL_AKITA_SIGNED_PREFIX").is_some() {
+            self.len.div_ceil(D)
+        } else {
+            self.num_rings
+        }
+    }
     fn scratch(&self, shape: DigitShape, max_rings: usize) -> Self::Scratch {
         SignedScratch::new(shape, max_rings)
     }

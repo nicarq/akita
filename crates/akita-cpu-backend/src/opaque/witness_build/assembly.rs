@@ -150,6 +150,7 @@ where
 }
 
 pub(crate) fn finish_cpu_recursive_witness<F, E>(
+    shared_layout: Option<&akita_params::WitnessLayout>,
     backend: &crate::opaque::CpuBackend<F, E>,
     prepared: &crate::opaque::CpuPreparedSetup<F>,
     build_handle: crate::opaque::CpuWitnessBuildHandle<F>,
@@ -160,6 +161,16 @@ pub(crate) fn finish_cpu_recursive_witness<F, E>(
 where
     F: Field + CanonicalEncoding + AkitaSerialize + Ring + Send + Sync + 'static,
 {
+    let profile = std::env::var_os("PGL_BUILD_LAPS").is_some();
+    let group_count = fold_inputs.len();
+    let mut start = std::time::Instant::now();
+    let mut lap = |stage: &str| {
+        if profile {
+            let now = std::time::Instant::now();
+            eprintln!("AKITA_FINISH groups={group_count} stage={stage} us={}", now.duration_since(start).as_micros());
+            start = now;
+        }
+    };
     for (group_index, fold_input) in fold_inputs.iter().enumerate() {
         let group_params = build_handle
             .level
@@ -195,6 +206,7 @@ where
                 .into(),
         ));
     }
+    lap("validate");
     let mut group_witnesses = Vec::with_capacity(fold_inputs.len());
     for (group_index, ((fold, opening), inner_relation)) in fold_inputs
         .into_iter()
@@ -214,6 +226,7 @@ where
         }
         let witness =
             opening.into_relation_witness(fold_handle, challenges, inner_relation, group_dims)?;
+        lap("into_group");
         group_witnesses.push(witness);
     }
     let witness = RingRelationWitness::from_groups(group_witnesses, d_quotients, compression);
@@ -223,14 +236,17 @@ where
             "backend relation RHS disagrees with the transcript-bound relation".into(),
         ));
     }
-    if relation.segment_layout(&level, None)?.live_coeff_len() != plan.logical_len() {
+    let extent=match shared_layout {Some(layout)=>layout.live_coeff_len(),None=>relation.segment_layout(&level,None)?.live_coeff_len()};
+    if extent != plan.logical_len() {
         return Err(AkitaError::InvalidInput(
             "recursive witness plan disagrees with its relation instance".into(),
         ));
     }
     let expanded = crate::opaque::ComputeBackendSetup::prepared_expanded_setup(backend, prepared);
     let ctx = OperationCtx::new(backend, prepared, expanded)?;
+    lap("plan");
     let witness_handle = cpu_recursive_witness_build(
+        shared_layout,
         relation,
         witness,
         &ctx,
@@ -239,6 +255,7 @@ where
         plan.commitment_ring_dimension(),
         binding,
     )?;
+    lap("build");
     Ok(witness_handle)
 }
 

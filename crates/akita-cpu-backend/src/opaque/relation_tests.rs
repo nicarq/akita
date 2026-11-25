@@ -121,10 +121,10 @@ fn witness_relation_plan_is_initialized_once_from_canonical_relation() {
     .expect("witness handle");
 
     witness
-        .initialize_relation_plan(&relation, &params)
+        .initialize_relation_plan(None,&relation, &params)
         .expect("relation plan initialization");
     assert!(matches!(
-        witness.initialize_relation_plan(&relation, &params),
+        witness.initialize_relation_plan(None,&relation, &params),
         Err(akita_error::AkitaError::Internal(message))
             if message.contains("already initialized")
     ));
@@ -472,6 +472,7 @@ fn build_reduced_without_quotients(
     reset_multi_group_quotient_calls();
     reset_quotient_decomposition_calls();
     let flat = cpu_recursive_witness_build(
+            None,
         instance,
         witness,
         ctx,
@@ -652,6 +653,7 @@ fn reduced_ring_switch_rejects_quotient_witness_without_running_quotients() {
         reset_multi_group_quotient_calls();
         reset_quotient_decomposition_calls();
         assert!(cpu_recursive_witness_build(
+            None,
             &instance,
             witness,
             ctx,

@@ -202,6 +202,21 @@ impl PackingStripes {
         Some(output)
     }
 
+    #[cfg(akita_fold_metal)]
+    pub(super) fn weighted_rows_into(&self,owner:&std::sync::Arc<Vec<u64>>,weights:&[[u64;2]],output:&mut [[u64;2]]) -> bool {
+        if self.source_words!=owner.len() || !(1..=64).contains(&weights.len())
+            || output.len().checked_mul(weights.len())!=Some(owner.len())
+            || output.len()<65536 || output.len()>u32::MAX as usize || weights.iter().flatten().any(|&v|v>=Q) {
+            return false;
+        }
+        let Some(key)=self.metal_key(owner) else{return false};
+        unsafe extern "C" {
+            fn akita_metal_weighted_rows(handle:*mut std::ffi::c_void,cells:u32,rows:u32,weights:*const [u64;2],output:*mut [u64;2])->i32;
+        }
+        // SAFETY: The source covers every row and the unique destination covers every column.
+        // The backend waits for GPU completion before releasing either borrow.
+        unsafe{akita_metal_weighted_rows(key.handle.as_ptr(),output.len() as u32,weights.len() as u32,weights.as_ptr(),output.as_mut_ptr())!=0}
+    }
     #[cfg(akita_packing_sme)]
     fn transpose(&self, source: &[u64]) -> Option<Vec<u64>> {
         let positions = self.positions;
@@ -394,3 +409,28 @@ impl PackingStripes {
 #[cfg(test)]
 #[path = "packing_sme/tests/stripes.rs"]
 mod tests;
+
+#[cfg(all(test,akita_fold_metal))]
+#[test]
+fn retained_row_output_replaces_every_previous_challenge(){
+    let cells=65536;
+    let source=std::sync::Arc::new((0..17*cells).map(|i|{
+        if i%3==0 {Q-1} else {(i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)%Q}
+    }).collect::<Vec<_>>());
+    let key=PackingStripes{positions:64,source_words:source.len(),metal:Default::default(),
+        #[cfg(akita_packing_sme)] words:Default::default()};
+    let mut output=vec![[u64::MAX;2];cells];
+    for seed in [7u64,0xa195_48b2_d2c3]{
+        let weights=core::array::from_fn::<_,17,_>(|i|[seed.wrapping_mul(i as u64+1)%Q,Q-1-i as u64]);
+        assert!(key.weighted_rows_into(&source,&weights,&mut output));
+        for (i,got) in output.iter().enumerate(){
+            let expected=core::array::from_fn(|c|{
+                let q=u128::from(Q);
+                (0..17).fold(0u128,|s,r| (s+(u128::from(source[r*cells+i])*u128::from(weights[r][c])%q))%q) as u64
+            });
+            assert_eq!(*got,expected,"column {i}");
+        }
+    }
+    assert!(!key.weighted_rows_into(&source,&[[0,0];16],&mut output));
+    assert!(!key.weighted_rows_into(&source,&[[Q,1];17],&mut output));
+}

@@ -422,6 +422,7 @@ pub(crate) fn element_partitioned_decompose_fold<S: BlockDigits<D>, const D: usi
     let digit_abs_bound = source.digit_abs_bound(shape);
     let window_span = source.i8_digit_span(shape).filter(|_| gathers_windows());
     let position_tile = position_tile_len(num_positions_per_block);
+    let stored_rings = source.stored_fold_rings();
     chunk_ranges
         .iter()
         .map(|range| {
@@ -435,8 +436,11 @@ pub(crate) fn element_partitioned_decompose_fold<S: BlockDigits<D>, const D: usi
                 ring_end - ring_start,
                 num_positions_per_block,
             )?;
+            let ring_end = ring_end.min(stored_rings);
+            let active_blocks = ring_end.saturating_sub(ring_start).div_ceil(num_positions_per_block);
             let plans = challenges
                 .iter()
+                .take(active_blocks)
                 .enumerate()
                 .map(|(block_idx, challenge)| PreparedChallenge {
                     challenge,
@@ -454,8 +458,8 @@ pub(crate) fn element_partitioned_decompose_fold<S: BlockDigits<D>, const D: usi
                     ChallengePlan::NarrowFull(..) | ChallengePlan::NarrowChunked(_)
                 )
             });
-            let repeated = source
-                .rings_repeat_within_full_blocks(ring_start..ring_end, num_positions_per_block);
+            let repeated = ring_start < ring_end
+                && source.rings_repeat_within_full_blocks(ring_start..ring_end, num_positions_per_block);
             let folded_width = if repeated { num_digits } else { inner_width };
             let mut out = vec![[0i32; D]; inner_width];
             cfg_chunks_mut!(out[..folded_width], position_tile * num_digits)

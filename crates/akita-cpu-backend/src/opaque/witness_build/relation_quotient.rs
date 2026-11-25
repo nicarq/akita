@@ -477,7 +477,21 @@ where
     // level-owned and follows all group blocks.
     let mut y_offset = 0usize;
 
-    for (&group_index, group_rows) in order.iter().zip(&rhs_layout.groups) {
+    let mut jobs = Vec::with_capacity(order.len());
+    for (&group_index, rows) in order.iter().zip(&rhs_layout.groups) {
+        let start = y_offset;
+        let dims = rows.role_dims;
+        let b_rows = rows.logical_b_rows()?;
+        y_offset = rows.n_a.checked_mul(dims.d_a())
+            .and_then(|n| n.checked_add(rows.opening_geometry.physical_coefficient_width()))
+            .and_then(|n| n.checked_add(b_rows.checked_mul(dims.d_b())?))
+            .and_then(|n| start.checked_add(n))
+            .ok_or_else(|| AkitaError::Internal("relation group RHS extent overflow".into()))?;
+        jobs.push((group_index, rows, start, y_offset));
+    }
+    let compute = |&(group_index, group_rows, mut y_offset, expected_end): &(usize, &akita_params::RelationGroupRows, usize, usize)| {
+        let mut outputs = Vec::new();
+        let begin = std::time::Instant::now();
         let group_dims = group_rows.role_dims;
         let group = groups.get(group_index).ok_or_else(|| {
             AkitaError::Internal("canonical relation quotient group is missing".into())
@@ -640,18 +654,8 @@ where
                 compute_group_a_relation_quotients::<F, O, D_A>(opening_ctx, group, group_opening)
             }
         )?;
-        if result
-            .get(consistency_row)
-            .ok_or_else(|| {
-                AkitaError::Internal("relation quotient consistency output slot is missing".into())
-            })?
-            .is_some()
-        {
-            return Err(AkitaError::Internal(
-                "relation quotient consistency output slot is already populated".into(),
-            ));
-        }
-        result[consistency_row] = Some(consistency_quotient);
+        outputs.push((consistency_row, consistency_quotient));
+        let a_elapsed = begin.elapsed();
 
         let a_range = lp.a_row_range(opening_batch, group_index)?;
         if a_range.len() != n_a || a_quotients.len() != n_a {
@@ -661,7 +665,7 @@ where
             ));
         }
         for (row_idx, quotient) in a_range.zip(a_quotients) {
-            result[row_idx] = Some(quotient);
+            outputs.push((row_idx, quotient));
         }
 
         y_offset = y_offset
@@ -764,7 +768,7 @@ where
                 }
                 for (commit_idx, row_idx) in b_range.clone().enumerate() {
                     let reduced = ring_from_flat_y::<F, D_B>(&recomposed_b, commit_idx * D_B)?;
-                    result[row_idx] = Some(RelationQuotientOutput::row_from_ring(
+                    outputs.push((row_idx, RelationQuotientOutput::row_from_ring(
                         quotient_from_cyclic_and_reduced(
                             b_cyclic.get(commit_idx).ok_or_else(|| {
                                 AkitaError::Internal(
@@ -773,12 +777,32 @@ where
                             })?,
                             &reduced,
                         ),
-                    )?);
+                    )?));
                 }
                 Ok::<(), AkitaError>(())
             }
         )?;
-        y_offset = b_end;
+        if b_end != expected_end {
+            return Err(AkitaError::Internal("relation quotient group RHS end disagrees with layout".into()));
+        }
+        if std::env::var_os("PGL_BUILD_LAPS").is_some() {
+            eprintln!("QUOTIENT_GROUP groups={} group={} a_us={} b_us={}", order.len(), group_index, a_elapsed.as_micros(), begin.elapsed().saturating_sub(a_elapsed).as_micros());
+        }
+        Ok(outputs)
+    };
+    #[cfg(feature = "parallel")]
+    let groups_out: Result<Vec<_>, _> = if jobs.len() > 1 && std::env::var_os("PGL_GROUP_QUOTIENTS").is_some() {
+        jobs.par_iter().map(compute).collect()
+    } else {
+        jobs.iter().map(compute).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let groups_out: Result<Vec<_>, _> = jobs.iter().map(compute).collect();
+    for (index, row) in groups_out?.into_iter().flatten() {
+        let slot = result.get_mut(index).ok_or_else(|| AkitaError::Internal("relation quotient output slot is missing".into()))?;
+        if slot.replace(row).is_some() {
+            return Err(AkitaError::Internal("relation quotient output slot is already populated".into()));
+        }
     }
 
     if n_d_active != 0 {

@@ -89,6 +89,7 @@ pub enum Stage2OpeningDescription<'a, E: Field> {
 
 /// Validated public inputs for constructing a backend-owned Stage 2 session.
 pub struct ValidatedRelationSessionPlan<'a, F: Field, E: Field> {
+    pub(crate) packing_events: Option<Vec<Vec<akita_types::RelationWeightEvent<E>>>>,
     pub(crate) batching_coefficient: E,
     pub(crate) stage1_point: &'a [E],
     pub(crate) range_image_evaluation: E,
@@ -108,6 +109,11 @@ pub struct ValidatedRelationSessionPlan<'a, F: Field, E: Field> {
 }
 
 impl<'a, F: Field, E: Field> ValidatedRelationSessionPlan<'a, F, E> {
+    /// Returns the packing events already expanded for this fold, in group order.
+    pub fn packing_events(&self) -> Option<&[Vec<akita_types::RelationWeightEvent<E>>]> {
+        self.packing_events.as_deref()
+    }
+
     pub fn batching_coefficient(&self) -> E {
         self.batching_coefficient
     }
@@ -180,6 +186,7 @@ impl<'a, F: Field, E: Field> ValidatedRelationSessionPlan<'a, F, E> {
         binary_batching: E,
     ) -> Self {
         Self {
+            packing_events: None,
             batching_coefficient,
             stage1_point,
             range_image_evaluation,

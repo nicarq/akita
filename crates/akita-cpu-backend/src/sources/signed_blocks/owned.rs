@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 use rayon::prelude::*;
 
 enum SignedBlockStorage {
-    I8(Vec<i8>),
+    I8(Arc<Vec<i8>>),
     I16(Vec<i16>),
     DecodedI8(Arc<dyn SignedBlockDecoder>),
 }
@@ -34,8 +34,21 @@ pub struct SignedBlockPoly {
 impl SignedBlockPoly {
     /// Own signed eight-bit coefficients, zero-extended past their length.
     pub fn i8(values: Vec<i8>, num_vars: usize) -> Result<Self, AkitaError> {
-        let blocks = SignedBlocks::i8(&values, num_vars)?;
-        let len = blocks.len();
+        let len = values.len();
+        Self::shared_i8_prefix(Arc::new(values), len, num_vars)
+    }
+
+    /// Borrow the first `len` signed coefficients and zero-extend to the Boolean domain.
+    /// Returns an error when the prefix exceeds the allocation or the domain.
+    pub fn shared_i8_prefix(
+        values: Arc<Vec<i8>>,
+        len: usize,
+        num_vars: usize,
+    ) -> Result<Self, AkitaError> {
+        let prefix = values.get(..len).ok_or_else(|| {
+            AkitaError::InvalidInput("signed source prefix exceeds the shared allocation".into())
+        })?;
+        SignedBlocks::i8(prefix, num_vars)?;
         Ok(Self::new(SignedBlockStorage::I8(values), len, num_vars))
     }
 
@@ -73,7 +86,7 @@ impl SignedBlockPoly {
     pub fn blocks(&self) -> SignedBlocks<'_> {
         SignedBlocks {
             values: match &self.storage {
-                SignedBlockStorage::I8(values) => SignedValues::I8(values),
+                SignedBlockStorage::I8(values) => SignedValues::I8(&values[..self.len]),
                 SignedBlockStorage::I16(values) => SignedValues::I16(values),
                 SignedBlockStorage::DecodedI8(decoder) => SignedValues::DecodedI8(decoder.as_ref()),
             },
@@ -97,7 +110,7 @@ impl SignedBlockPoly {
     fn visit_values(&self, mut visit: impl FnMut(i64)) {
         match &self.storage {
             SignedBlockStorage::I8(values) => {
-                values.iter().for_each(|&value| visit(i64::from(value)));
+                values[..self.len].iter().for_each(|&value| visit(i64::from(value)));
             }
             SignedBlockStorage::I16(values) => {
                 values.iter().for_each(|&value| visit(i64::from(value)));
@@ -258,7 +271,7 @@ impl<F: Field> SourceCoefficients<F> for SignedBlockPoly {
         let mut coefficients = vec![F::zero(); 1usize << self.num_vars];
         let live = &mut coefficients[..self.len];
         match &self.storage {
-            SignedBlockStorage::I8(values) => convert(values, live),
+            SignedBlockStorage::I8(values) => convert(&values[..self.len], live),
             SignedBlockStorage::I16(values) => convert(values, live),
             SignedBlockStorage::DecodedI8(decoder) => {
                 let chunk = |(index, out): (usize, &mut [F])| {
@@ -276,5 +289,31 @@ impl<F: Field> SourceCoefficients<F> for SignedBlockPoly {
             }
         }
         Ok(Cow::Owned(coefficients))
+    }
+}
+
+
+#[cfg(test)]
+mod shared_prefix_tests {
+    use super::{SignedBlockPoly, SourceCoefficients};
+    use jolt_field::Prime64Offset59 as F;
+    use std::sync::Arc;
+
+    #[test]
+    fn shared_prefix_matches_owned_and_ignores_the_tail() {
+        let storage = Arc::new(vec![1, -1, 2, 127, -128]);
+        for len in [0, 1, 3, 5] {
+            let shared = SignedBlockPoly::shared_i8_prefix(Arc::clone(&storage), len, 3).unwrap();
+            let owned = SignedBlockPoly::i8(storage[..len].to_vec(), 3).unwrap();
+            assert_eq!(shared.blocks().extrema(), owned.blocks().extrema());
+            let mut visited = Vec::new();
+            shared.visit_values(|value| visited.push(value));
+            assert_eq!(visited, storage[..len].iter().copied().map(i64::from).collect::<Vec<_>>());
+            let actual = <SignedBlockPoly as SourceCoefficients<F>>::source_coefficients(&shared).unwrap();
+            let expected = <SignedBlockPoly as SourceCoefficients<F>>::source_coefficients(&owned).unwrap();
+            assert_eq!(actual, expected);
+        }
+        assert!(SignedBlockPoly::shared_i8_prefix(Arc::clone(&storage), 6, 3).is_err());
+        assert!(SignedBlockPoly::shared_i8_prefix(storage, 5, 2).is_err());
     }
 }

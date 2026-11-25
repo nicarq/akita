@@ -84,6 +84,13 @@ where
         + 'static,
     B: ProverBackend<F, E>,
 {
+
+    let mut started = std::time::Instant::now();
+    let mut lap = |name: &str| {
+        let now = std::time::Instant::now();
+        if std::env::var_os("PGL_AKITA_PROFILE").is_some() { eprintln!("AKITA_LAP level={level} stage={name} us={}", now.duration_since(started).as_micros()); }
+        started = now;
+    };
     let trace_opening_batch = block_claims.opening_layout().clone();
     let trace_opening_batch = &trace_opening_batch;
     let context = backend.proof_context(session, level)?;
@@ -128,6 +135,7 @@ where
         )
     };
 
+    lap("reduce");
     let opening = &OperationCtx::new(backend, session, context);
     // A-role operation: prepare each group at its native A dimension,
     // fold-evaluate its claim polynomials, and derive scalar openings before
@@ -204,6 +212,7 @@ where
             actual: prepared_group_openings.len(),
         });
     }
+    lap("openings");
     let mut scalar_openings = Vec::with_capacity(opening_batch.num_total_polynomials());
     for (group_index, prepared) in prepared_group_openings.iter().enumerate() {
         if prepared.scalar_openings().len()
@@ -277,6 +286,7 @@ where
         expected_witness_len,
         commitment_ring_dimension,
     )?;
+    lap("relation");
     let evaluation_trace_claim_coefficients = trace_claim.claim_coefficients;
     // Recursive suffixes still omit the public row coefficients from ring-switch
     // finalization. Evaluation-trace coefficients are normalized independently and
@@ -636,6 +646,13 @@ where
         + 'static,
     B: ProverBackend<F, E> + 'static,
 {
+
+    let mut started = std::time::Instant::now();
+    let mut lap = |name: &str| {
+        let now = std::time::Instant::now();
+        if std::env::var_os("PGL_AKITA_PROFILE").is_some() { eprintln!("AKITA_LAP level={level} stage={name} us={}", now.duration_since(started).as_micros()); }
+        started = now;
+    };
     let opening_batch = prepared_fold.instance.opening_batch().clone();
     let challenge_field_bits = F::MODULUS_BITS
         .checked_mul(
@@ -690,6 +707,7 @@ where
         &next_witness,
         &commitment_material_handle,
     )?;
+    lap("witness_commit");
     let consumer = backend;
     let consumer_ctx = OperationCtx::new(
         backend,
@@ -743,18 +761,34 @@ where
         rs.alpha,
         instance.rhs(),
     )?;
+    lap("switch");
+    let mut run_stage1 = || {
+        prove_stage1::<F, E, _>(&consumer_ctx, grinding, fold_level, &mut rs, lp, &relation_range_image_plan)
+    };
+    let (stage1, packing_events) = match &opening_semantics {
+        OpeningFamily::SubringCoefficientPacking(batch)
+            if std::env::var_os("PGL_EARLY_PACKING_EVENTS").is_some() =>
+        {
+            std::thread::scope(|scope| -> Result<_, AkitaError> {
+                let events = scope.spawn(|| {
+                    batch.groups().iter()
+                        .map(akita_types::coefficient_packing_relation_events::<F, E>)
+                        .collect::<Result<Vec<_>, _>>()
+                });
+                let stage1 = run_stage1()?;
+                let events = events.join()
+                    .map_err(|_| AkitaError::Internal("packing event worker panicked".into()))??;
+                Ok((stage1, Some(events)))
+            })?
+        }
+        _ => (run_stage1()?, None),
+    };
     let Stage1ProveOutput {
         point: stage1_point,
         range_image_evaluation,
         physical_l2,
-    } = prove_stage1::<F, E, _>(
-        &consumer_ctx,
-        grinding,
-        fold_level,
-        &mut rs,
-        lp,
-        &relation_range_image_plan,
-    )?;
+    } = stage1;
+    lap("stage1");
     let physical_l2 = prepare_physical_l2_batch::<F, E>(grinding, level, physical_l2)?;
     let compression = prepare_stage2_compression::<F, E, _>(grinding, level, &mut rs)?;
     let batching_coeff =
@@ -800,6 +834,7 @@ where
         compression,
         physical_l2,
         linear_terms,
+        packing_events,
         scalar_opening_claim,
         &relation_range_image_plan,
         crate::backend::RelationWeightRequest {
@@ -816,6 +851,7 @@ where
         setup_batch
             .filter(|_| next_params.setup_contribution_mode() == SetupContributionMode::Direct),
     )?;
+    lap("stage2");
     let stage3_sumcheck_proof = prove_stage3::<F, E, _>(
         consumer,
         session,
@@ -833,6 +869,7 @@ where
         grinding,
         setup_batch,
     )?;
+    lap("stage3");
     let setup_prefix_opening =
         stage3_sumcheck_proof.map(|stage3| (stage3.setup_prefix_point, stage3.setup_prefix_eval));
 

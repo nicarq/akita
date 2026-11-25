@@ -231,6 +231,7 @@ where
     let (nonce, (work, mut candidate_outputs)) =
         first_jointly_accepted_nonce(max_grind_attempts, |nonce| {
             let mut candidate_outputs = Vec::with_capacity(groups.len());
+            let mut draws = Vec::with_capacity(groups.len());
             let work = {
                 let mut preview_state = grinding.preview_fold_response(site, nonce)?;
                 let work = preview_state.take_work()?;
@@ -245,43 +246,26 @@ where
                     else {
                         return Ok(None);
                     };
-                    let ranges = (root_lp.witness_chunk.num_chunks > 1)
-                        .then(|| {
-                            root_lp.witness_block_ranges(
-                                group.group_index,
-                                root_lp.witness_chunk.num_chunks,
-                            )
-                        })
-                        .transpose()?;
-                    let geometry = ranges
-                        .as_deref()
-                        .map_or(FoldProbeGeometry::Sparse, |chunk_ranges| {
-                            FoldProbeGeometry::SparseChunked { chunk_ranges }
-                        });
-                    let context = opening_ctx.for_group(group.group_index);
-                    let outcome = akita_params::dispatch_for_field!(
-                        ProtocolDispatchSlot::Role(RingRole::Inner),
-                        F,
-                        group.params.inner_commit_matrix_params().ring_dimension(),
-                        |D| {
-                            let plan = ValidatedFoldProbePlan::new::<D>(
-                                challenges.ambient_a(),
-                                group.num_polynomials,
-                                group.params.num_live_blocks(),
-                                geometry,
-                                group.params.num_positions_per_block(),
-                                group.params.num_digits_inner(),
-                                group.params.log_basis_inner(),
-                                group.params.opening_method(),
-                                prepared_group.acceptance,
-                            )?;
-                            opening_ctx.backend().probe_opening_fold(
-                                context.proof_context(),
-                                group.opening,
-                                &plan,
-                            )
-                        }
-                    )?;
+                    draws.push((prepared_group, challenges));
+                }
+                let ranges = draws.iter().map(|(g,_)| (root_lp.witness_chunk.num_chunks > 1)
+                    .then(|| root_lp.witness_block_ranges(g.input.group_index, root_lp.witness_chunk.num_chunks)).transpose()
+                ).collect::<Result<Vec<_>, _>>()?;
+                let jobs = draws.iter().zip(&ranges).map(|((g,challenges),r)| {
+                    let group = &g.input;
+                    let geometry = r.as_deref().map_or(FoldProbeGeometry::Sparse, |chunk_ranges| FoldProbeGeometry::SparseChunked {chunk_ranges});
+                    let plan = akita_params::dispatch_for_field!(ProtocolDispatchSlot::Role(RingRole::Inner), F,
+                        group.params.inner_commit_matrix_params().ring_dimension(), |D| {
+                            ValidatedFoldProbePlan::new::<D>(challenges.ambient_a(),group.num_polynomials,group.params.num_live_blocks(),
+                                geometry,group.params.num_positions_per_block(),group.params.num_digits_inner(),group.params.log_basis_inner(),
+                                group.params.opening_method(),g.acceptance)
+                        })?;
+                    Ok::<_,AkitaError>((opening_ctx.proof_context().for_group(group.group_index),group.opening,plan))
+                }).collect::<Result<Vec<_>,_>>()?;
+                let outcomes = opening_ctx.backend().probe_opening_batch(&jobs)?;
+                if outcomes.len()!=draws.len() {return Err(AkitaError::Internal("fold probe batch length mismatch".into()));}
+                for ((prepared_group,challenges),outcome) in draws.into_iter().zip(outcomes) {
+                    let group=&prepared_group.input;
                     let output = match outcome {
                         FoldProbeOutcome::Rejected => return Ok(None),
                         FoldProbeOutcome::Accepted {
@@ -293,10 +277,12 @@ where
                             diagnostics,
                         },
                     };
-                    candidate_outputs.push(output);
+                    candidate_outputs.push((group.group_index,output));
                 }
                 work
             };
+            candidate_outputs.sort_by_key(|(index,_)| *index);
+            let candidate_outputs: Vec<_> = candidate_outputs.into_iter().map(|(_,v)|v).collect();
             Ok(Some((work, candidate_outputs)))
         })?;
 

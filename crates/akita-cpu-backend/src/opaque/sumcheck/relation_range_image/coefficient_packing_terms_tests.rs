@@ -561,7 +561,10 @@ fn method_aware_relation_builder_uses_batch_packing_events_once() {
         batch.groups()[0].consistency_weight(),
         akita_types::proof::relation_row_weight(consistency_row, &unrelated_tau1).unwrap(),
     );
-    let deferred = build_relation_lane_weights(RelationLaneWeightInputs {
+    let events = batch.groups().iter()
+        .map(coefficient_packing_relation_events::<F, E>)
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    let build_deferred = |packing_events| build_relation_lane_weights(RelationLaneWeightInputs {
         setup: RelationSetupSource::DeferredClaim,
         instance: &fixture.relation,
         alpha,
@@ -571,9 +574,12 @@ fn method_aware_relation_builder_uses_batch_packing_events_once() {
         opening_source_len: domain.domain_len() / opening_ring_dim,
         opening_ring_dim,
         relation_plan: &fixture.relation_plan,
+        packing_events,
         packing_semantics: Some(&batch),
     })
     .unwrap();
+    let deferred = build_deferred(None);
+    assert_eq!(deferred.lanes(), build_deferred(Some(&events)).lanes());
 
     // Without setup terms, the shared packing events are the only
     // contributions to their lanes, added once.
@@ -647,6 +653,7 @@ fn method_aware_relation_builder_uses_batch_packing_events_once() {
         opening_source_len: domain.domain_len() / opening_ring_dim,
         opening_ring_dim,
         relation_plan: &fixture.relation_plan,
+        packing_events: None,
         packing_semantics: Some(&batch),
     })
     .unwrap();
@@ -675,6 +682,7 @@ fn method_aware_relation_builder_uses_batch_packing_events_once() {
         opening_source_len: domain.domain_len() / opening_ring_dim,
         opening_ring_dim,
         relation_plan: &fixture.relation_plan,
+        packing_events: None,
         packing_semantics: None,
     })
     .is_err());
@@ -818,6 +826,7 @@ fn relation_builder_rejects_alpha_that_differs_from_packing_batch() {
                 / opening_ring_dim,
             opening_ring_dim,
             relation_plan: &fixture.relation_plan,
+            packing_events: None,
             packing_semantics: Some(&batch),
         }),
         Err(AkitaError::Internal(_))

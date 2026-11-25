@@ -86,6 +86,9 @@ pub(crate) trait BlockDigits<const D: usize>: Sync {
         Self: 'a;
 
     fn num_rings(&self) -> usize;
+    fn stored_fold_rings(&self) -> usize {
+        self.num_rings()
+    }
     fn rings_repeat_within_full_blocks(&self, _rings: Range<usize>, _block_width: usize) -> bool {
         false
     }

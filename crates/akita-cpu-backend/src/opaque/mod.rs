@@ -302,7 +302,11 @@ where
             )?;
             binding.validate_group(group_index, build_handle.opening_batch.num_groups())?;
         }
+        let timer=std::time::Instant::now();
+        let shared=std::env::var_os("PGL_REUSE_RELATION_LAYOUT").is_some().then(||relation.segment_layout(&level,None)).transpose()?;
+        let layout_time=timer.elapsed();
         let mut witness_handle = crate::opaque::witness_build::finish_cpu_recursive_witness(
+            shared.as_ref(),
             self,
             self.prepared()?,
             build_handle,
@@ -310,7 +314,11 @@ where
             relation,
             plan,
         )?;
-        witness_handle.initialize_relation_plan(relation, &level)?;
+        let built=timer.elapsed();
+        witness_handle.initialize_relation_plan(shared,relation,&level)?;
+        if std::env::var_os("PGL_RELATION_PLAN_TIMES").is_some() {
+            eprintln!("AKITA_PLAN level={} layout_us={} build_us={} initialize_us={}",parent_binding.fold_level(),layout_time.as_micros(),(built-layout_time).as_micros(),(timer.elapsed()-built).as_micros());
+        }
         witness_handle.set_operation_binding(self.next_binding(parent_binding)?);
         Ok(witness_handle)
     }
