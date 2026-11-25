@@ -14,13 +14,13 @@ typedef struct {
     QuarticField terms[4];
 } QuarticSum;
 
-@interface AKQuarticState : NSObject {
+@interface PGLAKQuarticState : NSObject {
   @public
     uint32_t digits, prefixBytes;
     id<MTLBuffer> input, tail, classes, rows, partial, sums;
 }
 @end
-@implementation AKQuarticState
+@implementation PGLAKQuarticState
 @end
 
 static id<MTLDevice> device;
@@ -46,12 +46,12 @@ static void prepare_quartic(const char *source) {
     });
 }
 
-void *akita_quartic_open(const char *source, const uint8_t *data, uint32_t n, const QuarticField *values) {
+void *pgl_akita_quartic_open(const char *source, const uint8_t *data, uint32_t n, const QuarticField *values) {
     @autoreleasepool {
         prepare_quartic(source);
         if (!queue || quartic.maxTotalThreadsPerThreadgroup < 128 || reduce.maxTotalThreadsPerThreadgroup < 128)
             return NULL;
-        AKQuarticState *s = [[AKQuarticState alloc] init];
+        PGLAKQuarticState *s = [[PGLAKQuarticState alloc] init];
         s->digits = n;
         size_t bytes = ((size_t)n * 3 + 7) / 8;
         size_t page = (size_t)getpagesize();
@@ -99,10 +99,10 @@ static uint64_t add_coefficient(uint64_t a, uint64_t b) {
     return sum < UINT64_MAX - 58 ? sum : sum + 59;
 }
 
-int akita_quartic_round(void *handle, uint32_t round, const QuarticField *lo, uint32_t lowLength,
+int pgl_akita_quartic_round(void *handle, uint32_t round, const QuarticField *lo, uint32_t lowLength,
                         const QuarticField *hi, uint32_t highLength, const QuarticField *r, QuarticSum *result) {
     @autoreleasepool {
-        AKQuarticState *s = (__bridge AKQuarticState *)handle;
+        PGLAKQuarticState *s = (__bridge PGLAKQuarticState *)handle;
         uint32_t count = (s->digits + (1u << round) - 1) >> round;
         uint32_t stride = round <= 4 ? 1 : 1u << (round - 5);
         QuarticShape shape = {count, round, lowLength, stride, s->digits, s->prefixBytes, {0, 0}, *r};
@@ -150,11 +150,11 @@ int akita_quartic_round(void *handle, uint32_t round, const QuarticField *lo, ui
     }
 }
 
-void akita_quartic_export(void *handle, uint32_t round, size_t len, QuarticField *out) {
-    AKQuarticState *s = (__bridge AKQuarticState *)handle;
+void pgl_akita_quartic_export(void *handle, uint32_t round, size_t len, QuarticField *out) {
+    PGLAKQuarticState *s = (__bridge PGLAKQuarticState *)handle;
     const QuarticField *rows = s->rows.contents;
     for (size_t i = 0; i < len; ++i)
         out[i] = rows[i << (round - 4)];
 }
 
-void akita_quartic_release(void *handle) { CFRelease(handle); }
+void pgl_akita_quartic_release(void *handle) { CFRelease(handle); }

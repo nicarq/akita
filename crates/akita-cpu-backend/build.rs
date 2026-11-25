@@ -40,7 +40,7 @@ fn main() {
         return;
     };
     let clang_target = format!("--target=arm64-apple-macosx{deployment}");
-    let metal_archive = directory.join("libakita_fold_metal.a");
+    let metal_archive = directory.join("libpgl_akita_fold_metal.a");
     let sources = [
         "src/sources/dense/fixed_fold.m",
         "src/sources/quartic.m",
@@ -79,7 +79,7 @@ fn main() {
     if compiled && archive.status().is_ok_and(|s| s.success()) {
         println!("cargo:rustc-cfg=akita_fold_metal");
         println!("cargo:rustc-link-search=native={}", directory.display());
-        println!("cargo:rustc-link-lib=static=akita_fold_metal");
+        println!("cargo:rustc-link-lib=static=pgl_akita_fold_metal");
         println!("cargo:rustc-link-lib=framework=Foundation");
         println!("cargo:rustc-link-lib=framework=Metal");
     }
@@ -99,7 +99,7 @@ fn main() {
     }
 
     let object = directory.join("packing_sme.o");
-    let library = directory.join("libakita_packing_sme.a");
+    let library = directory.join("libpgl_akita_packing_sme.a");
     let Ok(compile) = Command::new("xcrun")
         .args([
             "--sdk",
@@ -132,7 +132,7 @@ fn main() {
         println!("cargo:rustc-cfg=akita_packing_sme");
         println!("cargo:rustc-link-search=native={}", directory.display());
         println!("cargo:rustc-link-search=native={}", runtime.display());
-        println!("cargo:rustc-link-lib=static=akita_packing_sme");
+        println!("cargo:rustc-link-lib=static=pgl_akita_packing_sme");
         println!("cargo:rustc-link-lib=static=clang_rt.osx");
     }
 }

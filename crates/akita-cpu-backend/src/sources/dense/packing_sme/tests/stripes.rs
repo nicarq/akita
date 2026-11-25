@@ -61,7 +61,7 @@ fn assert_sme2_source_matches_scalar(source: &[u64], weights: &[[u64; 2]]) -> [u
     // SAFETY: The callers check SME2 support. Source, weights and output have
     // the lengths required by the geometry checked above.
     let complete = unsafe {
-        super::akita_packing_sme2_source(
+        super::pgl_akita_packing_sme2_source(
             source.as_ptr(),
             weights.as_ptr().cast(),
             weights.len(),

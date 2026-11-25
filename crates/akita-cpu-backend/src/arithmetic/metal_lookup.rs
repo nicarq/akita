@@ -21,7 +21,7 @@ struct LookupShape {
 }
 
 unsafe extern "C" {
-    fn akita_metal_lookup_commit(
+    fn pgl_akita_metal_lookup_commit(
         source: *const c_char,
         shape: *const LookupShape,
         codes: *const u16,
@@ -166,7 +166,7 @@ fn run<F: Field + CanonicalEncoding, const D: usize>(
     const SOURCE: &str = concat!(include_str!("../sources/dense/fixed_fold.metal"), "\0");
     // SAFETY: The synchronous command borrows the two-prime matrix and the checked lookup slices until completion.
     let ok = unsafe {
-        akita_metal_lookup_commit(
+        pgl_akita_metal_lookup_commit(
             SOURCE.as_ptr().cast(),
             shape,
             codes.as_ptr(),

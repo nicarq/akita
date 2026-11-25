@@ -3,7 +3,7 @@ use super::MetalLookup;
 use jolt_field::Zero;
 
 unsafe extern "C" {
-    fn akita_quad_lookup_buffers_fit(
+    fn pgl_akita_quad_lookup_buffers_fit(
         limit: usize,
         body: usize,
         tail: usize,
@@ -18,7 +18,7 @@ fn oversized_metal_buffers_take_the_cpu_fallback() {
     let fits = |bytes: usize, copied| {
         // SAFETY: The native size check takes scalar byte counts and accesses no storage.
         unsafe {
-            akita_quad_lookup_buffers_fit(limit, bytes / page * page, bytes % page, copied) != 0
+            pgl_akita_quad_lookup_buffers_fit(limit, bytes / page * page, bytes % page, copied) != 0
         }
     };
     assert!(fits(limit, limit));

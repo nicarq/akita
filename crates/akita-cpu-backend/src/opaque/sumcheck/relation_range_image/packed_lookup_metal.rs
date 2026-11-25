@@ -3,9 +3,9 @@ use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;
 
 unsafe extern "C" {
-    fn akita_quad_lookup_open(raw: *const u8, len: usize, shader: *const c_char) -> *mut c_void;
-    fn akita_quad_lookup_close(handle: *mut c_void);
-    fn akita_quad_lookup_round(
+    fn pgl_akita_quad_lookup_open(raw: *const u8, len: usize, shader: *const c_char) -> *mut c_void;
+    fn pgl_akita_quad_lookup_close(handle: *mut c_void);
+    fn pgl_akita_quad_lookup_round(
         handle: *mut c_void,
         g: u32,
         pairs: u32,
@@ -39,7 +39,7 @@ impl MetalLookup {
         );
         // SAFETY: The synchronous constructor registers only complete pages of raw. Its owner outlives this handle.
         NonNull::new(unsafe {
-            akita_quad_lookup_open(raw.as_ptr(), raw.len(), shader.as_ptr().cast())
+            pgl_akita_quad_lookup_open(raw.as_ptr(), raw.len(), shader.as_ptr().cast())
         })
         .map(Self)
     }
@@ -73,7 +73,7 @@ impl MetalLookup {
         let mut sums = [E::zero(); 3];
         // SAFETY: Construction selects the canonical P64 quadratic extension. The checked slices remain live and the command completes before return.
         let valid = unsafe {
-            akita_quad_lookup_round(
+            pgl_akita_quad_lookup_round(
                 self.0.as_ptr(),
                 G as u32,
                 pair_count,
@@ -96,7 +96,7 @@ impl Drop for MetalLookup {
     fn drop(&mut self) {
         // SAFETY: This handle owns one retained native reference.
         unsafe {
-            akita_quad_lookup_close(self.0.as_ptr());
+            pgl_akita_quad_lookup_close(self.0.as_ptr());
         }
     }
 }

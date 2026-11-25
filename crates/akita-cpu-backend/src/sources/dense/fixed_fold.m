@@ -55,7 +55,7 @@ static void prepare(const char *source) {
     });
 }
 
-void *akita_metal_fold_key(const char *source, const int32_t *keys, size_t keyBytes) {
+void *pgl_akita_metal_fold_key(const char *source, const int32_t *keys, size_t keyBytes) {
     @autoreleasepool {
         prepare(source);
         if (!queue || !products || !inverse)
@@ -64,12 +64,12 @@ void *akita_metal_fold_key(const char *source, const int32_t *keys, size_t keyBy
     }
 }
 
-void akita_metal_fold_release(void *key) {
+void pgl_akita_metal_fold_release(void *key) {
     if (key)
         CFRelease(key);
 }
 
-int akita_metal_fold(void *rawKey, const FoldShape *shape, const int32_t *weights, const int32_t *tables,
+int pgl_akita_metal_fold(void *rawKey, const FoldShape *shape, const int32_t *weights, const int32_t *tables,
                      int32_t *out) {
     @autoreleasepool {
         id<MTLBuffer> key = (__bridge id<MTLBuffer>)rawKey;
@@ -127,7 +127,7 @@ static id<MTLDevice> packingDevice;
 static id<MTLCommandQueue> packingQueue;
 static id<MTLComputePipelineState> pack, combine, weightedRows;
 
-void *akita_metal_pack_key(const char *shader, const uint64_t *source, size_t bytes) {
+void *pgl_akita_metal_pack_key(const char *shader, const uint64_t *source, size_t bytes) {
     @autoreleasepool {
         static dispatch_once_t once;
         dispatch_once(&once, ^{
@@ -155,7 +155,7 @@ void *akita_metal_pack_key(const char *shader, const uint64_t *source, size_t by
         return (__bridge_retained void *)borrow_pages(packingDevice, source, bytes);
     }
 }
-int akita_metal_pack(void *handle, const uint64_t *weights, uint32_t positions, uint32_t blocks,
+int pgl_akita_metal_pack(void *handle, const uint64_t *weights, uint32_t positions, uint32_t blocks,
                      uint64_t *output) {
     @autoreleasepool {
         id<MTLBuffer> key = (__bridge id<MTLBuffer>)handle;
@@ -202,7 +202,7 @@ typedef struct {
     int32_t primes[3][4];
 } PackedCommitShape;
 
-int akita_metal_packed_commit(const char *source, const PackedCommitShape *input, const uint8_t *digits,
+int pgl_akita_metal_packed_commit(const char *source, const PackedCommitShape *input, const uint8_t *digits,
                               const int32_t *matrix, const int32_t *tables, int32_t *out) {
     @autoreleasepool {
         prepare(source);
@@ -265,7 +265,7 @@ int akita_metal_packed_commit(const char *source, const PackedCommitShape *input
     }
 }
 
-int akita_metal_weighted_rows(void *handle, uint32_t cells, uint32_t rows, const uint64_t *weights,
+int pgl_akita_metal_weighted_rows(void *handle, uint32_t cells, uint32_t rows, const uint64_t *weights,
                               uint64_t *output) {
     @autoreleasepool {
         if (!weightedRows)
@@ -300,7 +300,7 @@ typedef struct {
     uint32_t blocks, columns, tileColumns, tableLen, columnWidth, codeCount, liveCells;
     int32_t primes[2][4];
 } LookupShape;
-int akita_metal_lookup_commit(const char *source, const LookupShape *shape, const uint16_t *codes,
+int pgl_akita_metal_lookup_commit(const char *source, const LookupShape *shape, const uint16_t *codes,
                               const int16_t *lookup, size_t lookupBytes, const int32_t *spectra, size_t matrixBytes,
                               const int32_t *twiddles, const uint32_t *ranges, int32_t *out) {
     @autoreleasepool {
@@ -355,7 +355,7 @@ int akita_metal_lookup_commit(const char *source, const LookupShape *shape, cons
     }
 }
 
-int akita_metal_raw_ntt(const char *shader, void *rawKey, const uint64_t *source, size_t sourceBytes,
+int pgl_akita_metal_raw_ntt(const char *shader, void *rawKey, const uint64_t *source, size_t sourceBytes,
                         const FoldShape *shape, const int32_t *weights, const int32_t *tables, int32_t *out) {
     @autoreleasepool {
         prepare(shader);

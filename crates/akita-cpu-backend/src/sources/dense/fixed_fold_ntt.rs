@@ -54,10 +54,10 @@ unsafe impl Sync for MetalKey {}
 impl Drop for MetalKey {
     fn drop(&mut self) {
         unsafe extern "C" {
-            fn akita_metal_fold_release(key: *mut std::ffi::c_void);
+            fn pgl_akita_metal_fold_release(key: *mut std::ffi::c_void);
         }
         // SAFETY: The retained buffer is released once before its host storage drops.
-        unsafe { akita_metal_fold_release(self.0.as_ptr()) }
+        unsafe { pgl_akita_metal_fold_release(self.0.as_ptr()) }
     }
 }
 
@@ -183,12 +183,12 @@ impl FixedFoldNtt {
             prime: [i32; 4],
         }
         unsafe extern "C" {
-            fn akita_metal_fold_key(
+            fn pgl_akita_metal_fold_key(
                 source: *const std::ffi::c_char,
                 keys: *const i32,
                 bytes: usize,
             ) -> *mut std::ffi::c_void;
-            fn akita_metal_raw_ntt(
+            fn pgl_akita_metal_raw_ntt(
                 source: *const std::ffi::c_char,
                 key: *mut std::ffi::c_void,
                 words: *const u64,
@@ -198,7 +198,7 @@ impl FixedFoldNtt {
                 tables: *const i32,
                 out: *mut i32,
             ) -> i32;
-            fn akita_metal_fold(
+            fn pgl_akita_metal_fold(
                 key: *mut std::ffi::c_void,
                 shape: *const Shape,
                 weights: *const i32,
@@ -255,7 +255,7 @@ impl FixedFoldNtt {
             };
             // SAFETY: The live canonical prefix is borrowed until the synchronous command completes.
             return unsafe {
-                akita_metal_raw_ntt(
+                pgl_akita_metal_raw_ntt(
                     SOURCE.as_ptr().cast(),
                     registered.map_or(std::ptr::null_mut(), |key| key.handle.as_ptr()),
                     words.as_ptr(),
@@ -270,7 +270,7 @@ impl FixedFoldNtt {
         let Some(key) = self.metal.get_or_init(|| {
             // SAFETY: The key allocation is immutable and belongs to this struct for the handle's lifetime.
             let handle = unsafe {
-                akita_metal_fold_key(
+                pgl_akita_metal_fold_key(
                     SOURCE.as_ptr().cast(),
                     spectra.as_ptr().cast(),
                     std::mem::size_of_val(spectra),
@@ -282,7 +282,7 @@ impl FixedFoldNtt {
         };
         // SAFETY: Each input is live until the synchronous dispatch completes. The output holds rows * D words and has an exclusive borrow.
         unsafe {
-            akita_metal_fold(
+            pgl_akita_metal_fold(
                 key.0.as_ptr(),
                 &shape,
                 weights.as_ptr(),

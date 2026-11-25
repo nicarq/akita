@@ -3,13 +3,13 @@ use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;
 
 unsafe extern "C" {
-    fn akita_quartic_open(
+    fn pgl_akita_quartic_open(
         source: *const c_char,
         digits: *const u8,
         count: u32,
         values: *const c_void,
     ) -> *mut c_void;
-    fn akita_quartic_round(
+    fn pgl_akita_quartic_round(
         handle: *mut c_void,
         round: u32,
         low: *const c_void,
@@ -19,8 +19,8 @@ unsafe extern "C" {
         challenge: *const c_void,
         sums: *mut c_void,
     ) -> i32;
-    fn akita_quartic_export(handle: *mut c_void, round: u32, len: usize, rows: *mut c_void);
-    fn akita_quartic_release(handle: *mut c_void);
+    fn pgl_akita_quartic_export(handle: *mut c_void, round: u32, len: usize, rows: *mut c_void);
+    fn pgl_akita_quartic_release(handle: *mut c_void);
 }
 
 struct Handle(NonNull<c_void>);
@@ -33,7 +33,7 @@ unsafe impl Sync for Handle {}
 impl Drop for Handle {
     fn drop(&mut self) {
         // SAFETY: The native open function returned one retained reference.
-        unsafe { akita_quartic_release(self.0.as_ptr()) };
+        unsafe { pgl_akita_quartic_release(self.0.as_ptr()) };
     }
 }
 
@@ -72,7 +72,7 @@ impl<E: Field + Ring + Unreduced> MetalQuartic<E> {
         // SAFETY: DigitRangeSession selects only Ext2<Prime64Offset59>. The handle borrows digits,
         // which stays owned until after the handle drops, and copies the 65,536 field elements.
         let handle = Handle(NonNull::new(unsafe {
-            akita_quartic_open(
+            pgl_akita_quartic_open(
                 source.as_ptr().cast(),
                 digits.encoded_bytes().as_ptr(),
                 digits.len() as u32,
@@ -95,7 +95,7 @@ impl<E: Field + Ring + Unreduced> MetalQuartic<E> {
         // SAFETY: Both slices describe the equality table at this round. The native call completes
         // before returning and writes exactly four canonical quadratic-extension elements.
         let ok = unsafe {
-            akita_quartic_round(
+            pgl_akita_quartic_round(
                 self.handle.0.as_ptr(),
                 round as u32,
                 low.as_ptr().cast(),
@@ -137,7 +137,7 @@ impl<E: Field + Ring + Unreduced> MetalQuartic<E> {
         let mut rows = vec![E::zero(); count];
         // SAFETY: The completed round has exactly count live elements, and owns the source buffer.
         unsafe {
-            akita_quartic_export(
+            pgl_akita_quartic_export(
                 self.handle.0.as_ptr(),
                 round as u32,
                 count,

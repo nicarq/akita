@@ -25,21 +25,21 @@ type BlockKernel = unsafe extern "C" fn(*const u64, *const u64, usize, *mut u64)
 
 #[cfg(akita_packing_sme)]
 unsafe extern "C" {
-    fn akita_packing_sme_available() -> std::ffi::c_int;
-    fn akita_packing_sme2_available() -> std::ffi::c_int;
-    fn akita_packing_sme2_source(
+    fn pgl_akita_packing_sme_available() -> std::ffi::c_int;
+    fn pgl_akita_packing_sme2_available() -> std::ffi::c_int;
+    fn pgl_akita_packing_sme2_source(
         source: *const u64,
         weights: *const u64,
         terms: usize,
         output: *mut u64,
     ) -> std::ffi::c_int;
-    fn akita_packing_sme_striped(
+    fn pgl_akita_packing_sme_striped(
         source: *const u64,
         weights: *const u64,
         terms: usize,
         output: *mut u64,
     ) -> std::ffi::c_int;
-    fn akita_packing_sme_source(
+    fn pgl_akita_packing_sme_source(
         source: *const u64,
         weights: *const u64,
         terms: usize,
@@ -51,14 +51,14 @@ unsafe extern "C" {
 fn available() -> bool {
     static SUPPORT: OnceLock<bool> = OnceLock::new();
     // SAFETY: The platform query accesses no Rust memory.
-    *SUPPORT.get_or_init(|| unsafe { akita_packing_sme_available() != 0 })
+    *SUPPORT.get_or_init(|| unsafe { pgl_akita_packing_sme_available() != 0 })
 }
 
 #[cfg(akita_packing_sme)]
 fn sme2_available() -> bool {
     static SUPPORT: OnceLock<bool> = OnceLock::new();
     // SAFETY: This query checks CPU capabilities without entering streaming mode.
-    *SUPPORT.get_or_init(|| unsafe { akita_packing_sme2_available() != 0 })
+    *SUPPORT.get_or_init(|| unsafe { pgl_akita_packing_sme2_available() != 0 })
 }
 
 #[cfg(not(akita_packing_sme))]
@@ -90,10 +90,10 @@ unsafe impl Sync for PackingKey {}
 impl Drop for PackingKey {
     fn drop(&mut self) {
         unsafe extern "C" {
-            fn akita_metal_fold_release(handle: *mut std::ffi::c_void);
+            fn pgl_akita_metal_fold_release(handle: *mut std::ffi::c_void);
         }
         // SAFETY: Release the retained Metal reference before Rust drops its backing allocation.
-        unsafe { akita_metal_fold_release(self.handle.as_ptr()) }
+        unsafe { pgl_akita_metal_fold_release(self.handle.as_ptr()) }
     }
 }
 
@@ -130,7 +130,7 @@ impl PackingStripes {
             return None;
         }
         unsafe extern "C" {
-            fn akita_metal_pack_key(
+            fn pgl_akita_metal_pack_key(
                 shader: *const std::ffi::c_char,
                 source: *const u64,
                 bytes: usize,
@@ -141,7 +141,7 @@ impl PackingStripes {
             .get_or_init(|| {
                 // SAFETY: The handle retains the immutable allocation until Metal releases it.
                 let ptr = unsafe {
-                    akita_metal_pack_key(
+                    pgl_akita_metal_pack_key(
                         SHADER.as_ptr().cast(),
                         owner.as_ptr(),
                         self.source_words * std::mem::size_of::<u64>(),
@@ -177,7 +177,7 @@ impl PackingStripes {
         let mut output = Vec::<[u64; 2]>::new();
         output.try_reserve_exact(cells).ok()?;
         unsafe extern "C" {
-            fn akita_metal_weighted_rows(
+            fn pgl_akita_metal_weighted_rows(
                 handle: *mut std::ffi::c_void,
                 cells: u32,
                 rows: u32,
@@ -187,7 +187,7 @@ impl PackingStripes {
         }
         // SAFETY: The key contains rows * cells words. The command writes both words of every output before returning success.
         unsafe {
-            if akita_metal_weighted_rows(
+            if pgl_akita_metal_weighted_rows(
                 key.handle.as_ptr(),
                 cells as u32,
                 weights.len() as u32,
@@ -211,11 +211,11 @@ impl PackingStripes {
         }
         let Some(key)=self.metal_key(owner) else{return false};
         unsafe extern "C" {
-            fn akita_metal_weighted_rows(handle:*mut std::ffi::c_void,cells:u32,rows:u32,weights:*const [u64;2],output:*mut [u64;2])->i32;
+            fn pgl_akita_metal_weighted_rows(handle:*mut std::ffi::c_void,cells:u32,rows:u32,weights:*const [u64;2],output:*mut [u64;2])->i32;
         }
         // SAFETY: The source covers every row and the unique destination covers every column.
         // The backend waits for GPU completion before releasing either borrow.
-        unsafe{akita_metal_weighted_rows(key.handle.as_ptr(),output.len() as u32,weights.len() as u32,weights.as_ptr(),output.as_mut_ptr())!=0}
+        unsafe{pgl_akita_metal_weighted_rows(key.handle.as_ptr(),output.len() as u32,weights.len() as u32,weights.as_ptr(),output.as_mut_ptr())!=0}
     }
     #[cfg(akita_packing_sme)]
     fn transpose(&self, source: &[u64]) -> Option<Vec<u64>> {
@@ -321,7 +321,7 @@ impl PackingStripes {
                 && owner.as_ptr() == raw.as_ptr()
         }) {
             unsafe extern "C" {
-                fn akita_metal_pack(
+                fn pgl_akita_metal_pack(
                     handle: *mut std::ffi::c_void,
                     weights: *const u64,
                     positions: u32,
@@ -333,7 +333,7 @@ impl PackingStripes {
                 let mut coordinates = vec![0u64; active_len];
                 // SAFETY: The checked shape bounds the source, weights and output for the synchronous dispatch.
                 let completed = unsafe {
-                    akita_metal_pack(
+                    pgl_akita_metal_pack(
                         key.handle.as_ptr(),
                         canonical_weights.as_ptr().cast(),
                         self.positions as u32,
@@ -367,12 +367,12 @@ impl PackingStripes {
                 && self.positions >= 512
                 && sme2_available();
             let (words, raw_kernel): (&[u64], BlockKernel) = if stream {
-                (&[], akita_packing_sme2_source)
+                (&[], pgl_akita_packing_sme2_source)
             } else {
                 let Some(words) = self.words.get_or_init(|| self.transpose(raw)).as_ref() else {
                     return Ok(None);
                 };
-                (words, akita_packing_sme_source)
+                (words, pgl_akita_packing_sme_source)
             };
             let words_per_block = self.positions * RING_D;
             let complete =
@@ -383,7 +383,7 @@ impl PackingStripes {
                         let range = block * words_per_block..(block + 1) * words_per_block;
                         let (words, contract): (&[u64], BlockKernel) =
                             match words.get(range.clone()) {
-                                Some(packed) => (packed, akita_packing_sme_striped),
+                                Some(packed) => (packed, pgl_akita_packing_sme_striped),
                                 None => (&raw[range], raw_kernel),
                             };
                         // SAFETY: Both kernels read one full block and its weight pairs

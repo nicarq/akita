@@ -45,7 +45,7 @@ static const uint16_t packing_indices[2][32] = {
 } while (0)
 
 __arm_locally_streaming __arm_new("za")
-int akita_packing_sme_striped(const uint64_t *source, const uint64_t *weights,
+int pgl_akita_packing_sme_striped(const uint64_t *source, const uint64_t *weights,
                     size_t terms, uint64_t *output) {
     if (svcntd() != 8 || terms == 0 || terms > 16 * 1024) return 0;
     svbool_t all = svptrue_b64();
@@ -94,7 +94,7 @@ int akita_packing_sme_striped(const uint64_t *source, const uint64_t *weights,
 
 __attribute__((target("sme2")))
 __arm_locally_streaming __arm_new("za")
-int akita_packing_sme2_source(const uint64_t *source, const uint64_t *weights,
+int pgl_akita_packing_sme2_source(const uint64_t *source, const uint64_t *weights,
                             size_t terms, uint64_t *output) {
     const size_t panel = 64;
     const size_t positions = terms / 16;
@@ -161,7 +161,7 @@ int akita_packing_sme2_source(const uint64_t *source, const uint64_t *weights,
 } while (0)
 
 __arm_locally_streaming __arm_new("za")
-int akita_packing_sme_source(const uint64_t *source, const uint64_t *weights,
+int pgl_akita_packing_sme_source(const uint64_t *source, const uint64_t *weights,
                              size_t terms, uint64_t *output) {
     const size_t stride = 16;
     const size_t panel = 16;
@@ -227,12 +227,12 @@ static int cpu_feature(const char *name) {
     return !sysctlbyname(name, &feature, &size, NULL, 0) && feature;
 }
 
-int akita_packing_sme_available(void) {
+int pgl_akita_packing_sme_available(void) {
     return cpu_feature("hw.optional.arm.FEAT_SME") &&
         cpu_feature("hw.optional.arm.FEAT_SME_I16I64") && full_streaming_length();
 }
 
-int akita_packing_sme2_available(void) {
+int pgl_akita_packing_sme2_available(void) {
 #if __clang_major__ >= 21
     return cpu_feature("hw.optional.arm.FEAT_SME2");
 #else
@@ -241,8 +241,8 @@ int akita_packing_sme2_available(void) {
 }
 
 #if __clang_major__ < 21
-int akita_packing_sme2_source(const uint64_t *source, const uint64_t *weights,
+int pgl_akita_packing_sme2_source(const uint64_t *source, const uint64_t *weights,
                             size_t terms, uint64_t *output) {
-    return akita_packing_sme_source(source, weights, terms, output);
+    return pgl_akita_packing_sme_source(source, weights, terms, output);
 }
 #endif

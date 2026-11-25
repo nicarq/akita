@@ -6,20 +6,20 @@ typedef struct {
       skipLinear, outputMainElements, witnessMainBytes, materialize;
 } PackedQuadShape;
 
-@interface AKPackedQuadSource : NSObject {
+@interface PGLAKPackedQuadSource : NSObject {
 @public
   id<MTLBuffer> main;
   id<MTLBuffer> tail;
   size_t quadPairs;
 }
 @end
-@implementation AKPackedQuadSource
+@implementation PGLAKPackedQuadSource
 @end
 
 static id<MTLDevice> device;
 static id<MTLCommandQueue> queue;
 static id<MTLComputePipelineState> lookupPipeline, reducePipeline;
-int akita_quad_lookup_buffers_fit(size_t limit, size_t body, size_t tail,
+int pgl_akita_quad_lookup_buffers_fit(size_t limit, size_t body, size_t tail,
                                   size_t largestCopy) {
   return body <= limit && MAX(tail, 16) <= limit && largestCopy <= limit;
 }
@@ -29,7 +29,7 @@ static id<MTLBuffer> alias(void *pointer, size_t length) {
                                   options:MTLResourceStorageModeShared
                               deallocator:nil];
 }
-void *akita_quad_lookup_open(const uint8_t *bytes, size_t length,
+void *pgl_akita_quad_lookup_open(const uint8_t *bytes, size_t length,
                              const char *source) {
   @autoreleasepool {
     static dispatch_once_t once;
@@ -60,7 +60,7 @@ void *akita_quad_lookup_open(const uint8_t *bytes, size_t length,
         lookupPipeline.maxTotalThreadsPerThreadgroup < 128 ||
         reducePipeline.maxTotalThreadsPerThreadgroup < 96 || !body ||
         length > UINT32_MAX || length % 3 ||
-        !akita_quad_lookup_buffers_fit(device.maxBufferLength, body, tail, 0) ||
+        !pgl_akita_quad_lookup_buffers_fit(device.maxBufferLength, body, tail, 0) ||
         ((uintptr_t)bytes % page))
       return NULL;
     id<MTLBuffer> mainBuffer = alias((void *)bytes, body),
@@ -69,25 +69,25 @@ void *akita_quad_lookup_open(const uint8_t *bytes, size_t length,
     if (!mainBuffer || !tailBuffer)
       return NULL;
     memcpy(tailBuffer.contents, (char *)bytes + body, tail);
-    AKPackedQuadSource *owner = [AKPackedQuadSource new];
+    PGLAKPackedQuadSource *owner = [PGLAKPackedQuadSource new];
     owner->main = mainBuffer;
     owner->tail = tailBuffer;
     owner->quadPairs = length / 3;
     return (__bridge_retained void *)owner;
   }
 }
-void akita_quad_lookup_close(void *h) {
+void pgl_akita_quad_lookup_close(void *h) {
   @autoreleasepool {
     (void)CFBridgingRelease(h);
   }
 }
-int akita_quad_lookup_round(void *h, uint32_t quadsPerEntry, uint32_t pairs,
+int pgl_akita_quad_lookup_round(void *h, uint32_t quadsPerEntry, uint32_t pairs,
                             uint32_t classCount, const void *lookupValues,
                             const void *lowWeights, uint32_t lowLength,
                             const void *highWeights, uint32_t highLength,
                             int skipLinear, void *target, void *total) {
   @autoreleasepool {
-    AKPackedQuadSource *owner = (__bridge AKPackedQuadSource *)h;
+    PGLAKPackedQuadSource *owner = (__bridge PGLAKPackedQuadSource *)h;
     id<MTLBuffer> mainBuffer = owner->main;
     size_t page = getpagesize(), length = target ? (size_t)pairs * 32 : 0,
            body = length / page * page, tail = length - body;
@@ -110,7 +110,7 @@ int akita_quad_lookup_round(void *h, uint32_t quadsPerEntry, uint32_t pairs,
            partialBytes = (size_t)shape.groupCount * 48;
     size_t largestCopy =
         MAX(MAX(lookupBytes, lowBytes), MAX(highBytes, partialBytes));
-    if (!akita_quad_lookup_buffers_fit(device.maxBufferLength, body, tail,
+    if (!pgl_akita_quad_lookup_buffers_fit(device.maxBufferLength, body, tail,
                                        largestCopy))
       return 0;
     id<MTLBuffer> lookupTable = [device newBufferWithBytes:lookupValues

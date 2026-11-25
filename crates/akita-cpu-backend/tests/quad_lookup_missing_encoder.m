@@ -23,15 +23,15 @@ int main(void) {
     if (posix_memalign(&witness, getpagesize(), bytes) != 0)
       return 1;
     memset(witness, 0, bytes);
-    void *handle = akita_quad_lookup_open(witness, bytes, shader.bytes);
+    void *handle = pgl_akita_quad_lookup_open(witness, bytes, shader.bytes);
     if (!handle)
       return 1;
 
     uint64_t table[2 * 4096][2] = {}, low[1][2] = {{1, 0}}, total[6] = {42};
     NSMutableData *high = [NSMutableData dataWithLength:pairs * sizeof(low)];
-    int success = akita_quad_lookup_round(handle, 2, pairs, 4096, table, low, 1,
+    int success = pgl_akita_quad_lookup_round(handle, 2, pairs, 4096, table, low, 1,
                                           high.bytes, pairs, 0, NULL, total);
-    akita_quad_lookup_close(handle);
+    pgl_akita_quad_lookup_close(handle);
     free(witness);
     if (!requestedEncoder || success || total[0] != 42) {
       fprintf(stderr, "requested encoder=%d, success=%d, first sum=%llu\n",

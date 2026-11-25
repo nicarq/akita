@@ -13,7 +13,7 @@ struct Shape {
 }
 
 unsafe extern "C" {
-    fn akita_metal_packed_commit(
+    fn pgl_akita_metal_packed_commit(
         source: *const c_char,
         shape: *const Shape,
         digits: *const u8,
@@ -70,7 +70,7 @@ pub(crate) fn commit<F: Field + CanonicalEncoding, const D: usize>(
     // SAFETY: Each CRT ring is transparent over 3×D contiguous i32 words. The blocking
     // command borrows the slices above and writes only the initialized output slice.
     let ok = unsafe {
-        akita_metal_packed_commit(
+        pgl_akita_metal_packed_commit(
             SOURCE.as_ptr().cast(),
             &shape,
             bytes.as_ptr(),
